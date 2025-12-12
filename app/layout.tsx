@@ -6,26 +6,10 @@ import { Toaster } from "@/components/ui/toaster"
 
 const telma = localFont({
   src: [
-    {
-      path: "../../public/fonts/Telma-Regular.woff2",
-      weight: "400",
-      style: "normal",
-    },
-    {
-      path: "../../public/fonts/Telma-Medium.woff2",
-      weight: "500",
-      style: "normal",
-    },
-    {
-      path: "../../public/fonts/Telma-SemiBold.woff2",
-      weight: "600",
-      style: "normal",
-    },
-    {
-      path: "../../public/fonts/Telma-Bold.woff2",
-      weight: "700",
-      style: "normal",
-    },
+    { path: "/fonts/Telma-Light.woff2", weight: "300" },
+    { path: "/fonts/Telma-Regular.woff2", weight: "400" },
+    { path: "/fonts/Telma-Medium.woff2", weight: "500" },
+    { path: "/fonts/Telma-Bold.woff2", weight: "700" },
   ],
   variable: "--font-telma",
 })
