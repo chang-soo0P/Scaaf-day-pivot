@@ -1,46 +1,58 @@
-import { NextRequest, NextResponse } from "next/server";
-import crypto from "crypto";
+import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY! // 중요! 서비스 키 필요
-);
+export async function POST(req: Request) {
+  try {
+    // Mailgun sends POST body as form-data
+    const body = await req.formData();
 
-export async function POST(req: NextRequest) {
-  const payload = await req.formData();
+    const from = body.get("from")?.toString() || "";
+    const to = body.get("recipient")?.toString() || "";
+    const subject = body.get("subject")?.toString() || "";
+    const bodyPlain = body.get("body-plain")?.toString() || "";
+    const bodyHtml = body.get("body-html")?.toString() || "";
+    const timestamp = body.get("timestamp")?.toString() || "";
 
-  const signature = payload.get("signature") as any;
-  const timestamp = signature.timestamp;
-  const token = signature.token;
-  const sig = signature.signature;
+    // 🔐 Supabase service client
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL as string,
+      process.env.SUPABASE_SERVICE_ROLE_KEY as string // Service role is required for inserts from server
+    );
 
-  const apiKey = process.env.MAILGUN_PRIVATE_API_KEY!;
+    // 📨 Save inbound email into DB
+    const { data, error } = await supabase
+      .from("inbox_emails")
+      .insert({
+        from_address: from,
+        to_address: to,
+        subject: subject,
+        body_text: bodyPlain,
+        body_html: bodyHtml,
+        received_at: timestamp
+          ? new Date(Number(timestamp) * 1000).toISOString()
+          : new Date().toISOString(),
+      })
+      .select();
 
-  // Verify signature
-  const expectedSig = crypto
-    .createHmac("sha256", apiKey)
-    .update(timestamp + token)
-    .digest("hex");
+    if (error) {
+      console.error("[Supabase Insert Error]", error);
+      return NextResponse.json(
+        { ok: false, error: error.message },
+        { status: 500 }
+      );
+    }
 
-  if (expectedSig !== sig) {
-    return NextResponse.json({ error: "Invalid signature" }, { status: 400 });
+    console.log("📩 New inbound email saved:", data);
+
+    return NextResponse.json(
+      { ok: true, received: true, email: data },
+      { status: 200 }
+    );
+  } catch (err: any) {
+    console.error("[Webhook Runtime Error]", err);
+    return NextResponse.json(
+      { ok: false, error: err.message },
+      { status: 500 }
+    );
   }
-
-  const from = payload.get("from");
-  const subject = payload.get("subject");
-  const body = payload.get("body-plain");
-
-  // Save into Supabase
-  const { error } = await supabase.from("emails").insert({
-    from_address: from,
-    subject,
-    body_text: body,
-  });
-
-  if (error) {
-    return NextResponse.json({ error }, { status: 500 });
-  }
-
-  return NextResponse.json({ status: "ok" });
 }
