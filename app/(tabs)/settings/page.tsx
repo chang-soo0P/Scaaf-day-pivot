@@ -34,13 +34,32 @@ export default function SettingsPage() {
     }
   }
 
-  const handleLogout = () => {
-    // TODO: Integrate with real auth when available (clear tokens, session, etc.)
-    toast({
-      title: "Logged out",
-      description: "You have been logged out successfully.",
-    })
-    router.push("/")
+  const handleLogout = async () => {
+    try {
+      const { signOut } = await import('@/lib/auth-client')
+      const { error } = await signOut()
+      
+      if (error) {
+        toast({
+          title: "Error",
+          description: "Failed to log out. Please try again.",
+          variant: "destructive",
+        })
+      } else {
+        toast({
+          title: "Logged out",
+          description: "You have been logged out successfully.",
+        })
+        router.push("/auth/login")
+      }
+    } catch (error) {
+      console.error('Logout error:', error)
+      toast({
+        title: "Error",
+        description: "An error occurred during logout.",
+        variant: "destructive",
+      })
+    }
   }
 
   return (

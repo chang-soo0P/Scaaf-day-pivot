@@ -23,6 +23,8 @@ export async function POST(request: NextRequest) {
 
     // 이메일 데이터 추출
     const sender = parsed.from?.text || parsed.from?.value?.[0]?.address || ''
+    const recipient = parsed.to?.text || parsed.to?.value?.[0]?.address || ''
+    const recipientEmail = parsed.to?.value?.[0]?.address || ''
     const subject = parsed.subject || ''
     const bodyText = parsed.text || ''
     const bodyHtml = parsed.html || ''
@@ -32,6 +34,26 @@ export async function POST(request: NextRequest) {
     const references = parsed.references 
       ? (Array.isArray(parsed.references) ? parsed.references.join(', ') : parsed.references) 
       : null
+
+    // Find user by email address (recipient) using database function
+    let userId: string | null = null
+    if (recipientEmail) {
+      try {
+        // Use the database function to get user_id by email
+        const { data: userData, error: userError } = await supabase
+          .rpc('get_user_id_by_email', { email_address: recipientEmail.toLowerCase() })
+        
+        if (!userError && userData) {
+          userId = userData
+          console.log(`Found user ${userId} for email: ${recipientEmail}`)
+        } else {
+          console.log(`User not found for email: ${recipientEmail}`)
+        }
+      } catch (error) {
+        console.error('Error finding user by email:', error)
+        // Continue without user_id - email will be saved but not associated
+      }
+    }
     
     // Headers를 JSONB 형식으로 변환
     const headers = parsed.headers ? Object.fromEntries(
@@ -52,6 +74,7 @@ export async function POST(request: NextRequest) {
     const { data, error } = await supabase
       .from('emails')
       .insert({
+        user_id: userId, // Automatically link to user if found
         sender: sender,
         subject: subject,
         body_text: bodyText,

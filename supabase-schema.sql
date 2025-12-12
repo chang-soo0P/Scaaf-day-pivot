@@ -6,6 +6,24 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- ============================================
+-- Function to get user_id by email
+-- This function allows the API to find users by email address
+-- ============================================
+CREATE OR REPLACE FUNCTION get_user_id_by_email(email_address TEXT)
+RETURNS UUID AS $$
+DECLARE
+  user_uuid UUID;
+BEGIN
+  SELECT id INTO user_uuid
+  FROM auth.users
+  WHERE email = LOWER(email_address)
+  LIMIT 1;
+  
+  RETURN user_uuid;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ============================================
 -- Topics Table
 -- ============================================
 CREATE TABLE IF NOT EXISTS topics (
@@ -27,6 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_topics_name ON topics(name);
 -- ============================================
 CREATE TABLE IF NOT EXISTS emails (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES auth.users(id) ON DELETE CASCADE,
   sender TEXT NOT NULL,
   subject TEXT NOT NULL,
   body_html TEXT,
@@ -60,6 +79,7 @@ CREATE INDEX IF NOT EXISTS idx_emails_sender ON emails(sender);
 CREATE INDEX IF NOT EXISTS idx_emails_subject ON emails(subject);
 CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id);
 CREATE INDEX IF NOT EXISTS idx_emails_created_at ON emails(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_emails_user_id ON emails(user_id);
 
 -- ============================================
 -- Email Topics Junction Table (Many-to-Many)
@@ -175,67 +195,132 @@ CREATE POLICY "Topics are viewable by everyone"
 
 CREATE POLICY "Topics are insertable by authenticated users"
   ON topics FOR INSERT
-  WITH CHECK (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  WITH CHECK (auth.uid() IS NOT NULL);
 
 CREATE POLICY "Topics are updatable by authenticated users"
   ON topics FOR UPDATE
-  USING (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  USING (auth.uid() IS NOT NULL);
 
--- Emails: Allow read for all, write for authenticated
-CREATE POLICY "Emails are viewable by everyone"
+-- Emails: Users can only see and manage their own emails
+CREATE POLICY "Users can view their own emails"
   ON emails FOR SELECT
-  USING (true);
+  USING (auth.uid() = user_id);
 
-CREATE POLICY "Emails are insertable by authenticated users"
+CREATE POLICY "Users can insert their own emails"
   ON emails FOR INSERT
-  WITH CHECK (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "Emails are updatable by authenticated users"
+CREATE POLICY "Users can update their own emails"
   ON emails FOR UPDATE
-  USING (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  USING (auth.uid() = user_id)
+  WITH CHECK (auth.uid() = user_id);
 
--- Email Topics: Allow read for all, write for authenticated
-CREATE POLICY "Email topics are viewable by everyone"
+CREATE POLICY "Users can delete their own emails"
+  ON emails FOR DELETE
+  USING (auth.uid() = user_id);
+
+-- Email Topics: Users can only manage topics for their own emails
+CREATE POLICY "Users can view email topics for their emails"
   ON email_topics FOR SELECT
-  USING (true);
+  USING (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = email_topics.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
-CREATE POLICY "Email topics are insertable by authenticated users"
+CREATE POLICY "Users can insert email topics for their emails"
   ON email_topics FOR INSERT
-  WITH CHECK (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = email_topics.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
--- Highlights: Allow read for all, write for authenticated
-CREATE POLICY "Highlights are viewable by everyone"
+-- Highlights: Users can only manage highlights for their own emails
+CREATE POLICY "Users can view highlights for their emails"
   ON highlights FOR SELECT
-  USING (true);
+  USING (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = highlights.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
-CREATE POLICY "Highlights are insertable by authenticated users"
+CREATE POLICY "Users can insert highlights for their emails"
   ON highlights FOR INSERT
-  WITH CHECK (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = highlights.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
-CREATE POLICY "Highlights are updatable by authenticated users"
+CREATE POLICY "Users can update highlights for their emails"
   ON highlights FOR UPDATE
-  USING (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  USING (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = highlights.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
-CREATE POLICY "Highlights are deletable by authenticated users"
+CREATE POLICY "Users can delete highlights for their emails"
   ON highlights FOR DELETE
-  USING (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  USING (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = highlights.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
--- Comments: Allow read for all, write for authenticated
-CREATE POLICY "Comments are viewable by everyone"
+-- Comments: Users can only manage comments for their own emails
+CREATE POLICY "Users can view comments for their emails"
   ON comments FOR SELECT
-  USING (true);
+  USING (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = comments.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
-CREATE POLICY "Comments are insertable by authenticated users"
+CREATE POLICY "Users can insert comments for their emails"
   ON comments FOR INSERT
-  WITH CHECK (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = comments.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
-CREATE POLICY "Comments are updatable by authenticated users"
+CREATE POLICY "Users can update comments for their emails"
   ON comments FOR UPDATE
-  USING (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  USING (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = comments.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
-CREATE POLICY "Comments are deletable by authenticated users"
+CREATE POLICY "Users can delete comments for their emails"
   ON comments FOR DELETE
-  USING (true); -- Replace with auth.uid() IS NOT NULL when auth is set up
+  USING (
+    EXISTS (
+      SELECT 1 FROM emails
+      WHERE emails.id = comments.email_id
+      AND emails.user_id = auth.uid()
+    )
+  );
 
 -- ============================================
 -- Helper Views (Optional)
