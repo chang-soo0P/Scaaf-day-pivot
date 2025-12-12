@@ -1,5 +1,5 @@
 "use client"
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import Image from "next/image"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -27,36 +27,74 @@ import {
   getTopicStats,
   getTodayActivity,
   getTopicById,
+  getEmailsWithRelations,
   type Email,
   type TopicInfo,
   type Reaction,
-} from "@/lib/email-mock-data"
+} from "@/lib/supabase-queries"
 import { useDailyMissionStore } from "@/lib/daily-mission-store"
 
 // --- Types ---
 type TabType = "byTopics" | "all"
 type LayoutMode = "stack" | "grid" | "list"
 
-// --- Derived data from shared module ---
+// --- Derived data from Supabase ---
 function useTopicData() {
-  const allTopics = getAllTopics()
+  const [topicsWithStats, setTopicsWithStats] = useState<Array<TopicInfo & {
+    newsletterCount: number
+    newCommentsToday: number
+    newHighlightsToday: number
+  }>>([])
+  const [loading, setLoading] = useState(true)
 
-  const topicsWithStats = allTopics.map((topic) => {
-    const stats = getTopicStats(topic.id)
-    const todayActivity = getTodayActivity(topic.id)
-    return {
-      ...topic,
-      newsletterCount: stats.newsletterCount,
-      newCommentsToday: todayActivity.newCommentsToday,
-      newHighlightsToday: todayActivity.newHighlightsToday,
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        const allTopics = await getAllTopics()
+        const topicsWithStatsData = await Promise.all(
+          allTopics.map(async (topic) => {
+            const stats = await getTopicStats(topic.id)
+            const todayActivity = await getTodayActivity(topic.id)
+            return {
+              ...topic,
+              newsletterCount: stats.newsletterCount,
+              newCommentsToday: todayActivity.newCommentsToday,
+              newHighlightsToday: todayActivity.newHighlightsToday,
+            }
+          })
+        )
+        setTopicsWithStats(topicsWithStatsData)
+      } catch (error) {
+        console.error('Error fetching topic data:', error)
+      } finally {
+        setLoading(false)
+      }
     }
-  })
+    fetchData()
+  }, [])
 
-  return topicsWithStats
+  return { topicsWithStats, loading }
 }
 
 function useEmailsForTopic(topicId: string) {
-  return getEmailsByTopicId(topicId)
+  const [emails, setEmails] = useState<Email[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        const data = await getEmailsByTopicId(topicId)
+        setEmails(data)
+      } catch (error) {
+        console.error('Error fetching emails:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+    fetchData()
+  }, [topicId])
+
+  return { emails, loading }
 }
 
 // --- Layout Icons ---
@@ -599,14 +637,45 @@ function DailyMissionCard() {
 export default function InboxPage() {
   const router = useRouter()
   const [activeTab, setActiveTab] = useState<TabType>("byTopics")
-  const [selectedTopicId, setSelectedTopicId] = useState<string>("topic-1")
+  const [selectedTopicId, setSelectedTopicId] = useState<string>("")
   const [layout, setLayout] = useState<LayoutMode>("list")
   const [showTopicDetail, setShowTopicDetail] = useState(false)
+  const [allEmails, setAllEmails] = useState<Email[]>([])
+  const [selectedTopic, setSelectedTopic] = useState<TopicInfo | null>(null)
+  const [allEmailsLoading, setAllEmailsLoading] = useState(true)
 
-  const topicsWithStats = useTopicData()
-  const selectedTopicEmails = useEmailsForTopic(selectedTopicId)
-  const allEmails = getAllTopics().flatMap((t) => getEmailsByTopicId(t.id))
-  const selectedTopic = getTopicById(selectedTopicId)
+  const { topicsWithStats, loading: topicsLoading } = useTopicData()
+  const { emails: selectedTopicEmails, loading: emailsLoading } = useEmailsForTopic(selectedTopicId)
+
+  // Set initial topic ID when topics are loaded
+  useEffect(() => {
+    if (topicsWithStats.length > 0 && !selectedTopicId) {
+      setSelectedTopicId(topicsWithStats[0].id)
+    }
+  }, [topicsWithStats, selectedTopicId])
+
+  // Fetch selected topic details
+  useEffect(() => {
+    if (selectedTopicId) {
+      getTopicById(selectedTopicId).then(setSelectedTopic)
+    }
+  }, [selectedTopicId])
+
+  // Fetch all emails for "All" tab
+  useEffect(() => {
+    async function fetchAllEmails() {
+      try {
+        setAllEmailsLoading(true)
+        const emails = await getEmailsWithRelations()
+        setAllEmails(emails)
+      } catch (error) {
+        console.error('Error fetching all emails:', error)
+      } finally {
+        setAllEmailsLoading(false)
+      }
+    }
+    fetchAllEmails()
+  }, [])
 
   const handleTopicHeadingClick = () => {
     setShowTopicDetail(true)
@@ -619,6 +688,15 @@ export default function InboxPage() {
 
   const handleOpenTodayEmails = () => {
     setActiveTab("all")
+  }
+
+  // Loading state
+  if (topicsLoading || (selectedTopicId && emailsLoading)) {
+    return (
+      <div className="flex min-h-full flex-col items-center justify-center">
+        <p className="text-sm text-muted-foreground">Loading...</p>
+      </div>
+    )
   }
 
   // If showing topic detail view
@@ -672,31 +750,35 @@ export default function InboxPage() {
         {activeTab === "byTopics" ? (
           <>
             {/* Horizontal topic pills */}
-            <div className="flex gap-2 overflow-x-auto pb-4 -mx-4 px-4 scrollbar-hide">
-              {topicsWithStats.map((topic) => (
-                <button
-                  key={topic.id}
-                  onClick={() => setSelectedTopicId(topic.id)}
-                  className={cn(
-                    "shrink-0 rounded-full px-4 py-2 text-sm font-medium transition-colors",
-                    selectedTopicId === topic.id
-                      ? "bg-foreground text-background"
-                      : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-                  )}
-                >
-                  {topic.name}
-                </button>
-              ))}
-            </div>
+            {topicsWithStats.length > 0 && (
+              <div className="flex gap-2 overflow-x-auto pb-4 -mx-4 px-4 scrollbar-hide">
+                {topicsWithStats.map((topic) => (
+                  <button
+                    key={topic.id}
+                    onClick={() => setSelectedTopicId(topic.id)}
+                    className={cn(
+                      "shrink-0 rounded-full px-4 py-2 text-sm font-medium transition-colors",
+                      selectedTopicId === topic.id
+                        ? "bg-foreground text-background"
+                        : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+                    )}
+                  >
+                    {topic.name}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {/* Topic heading and view toggle */}
             <div className="flex items-start justify-between mb-4">
               <button onClick={handleTopicHeadingClick} className="text-left hover:opacity-80 transition-opacity">
                 <h2 className="text-xl font-bold text-foreground flex items-center gap-1">
                   <Hash className="h-5 w-5" />
-                  {topicsWithStats.find((t) => t.id === selectedTopicId)?.name}
+                  {topicsWithStats.find((t) => t.id === selectedTopicId)?.name || 'Loading...'}
                 </h2>
-                <p className="text-sm text-muted-foreground">{selectedTopicEmails.length} issues today</p>
+                <p className="text-sm text-muted-foreground">
+                  {emailsLoading ? 'Loading...' : `${selectedTopicEmails.length} issues today`}
+                </p>
               </button>
 
               {/* View mode toggle */}
@@ -723,24 +805,46 @@ export default function InboxPage() {
             </div>
 
             {/* Issue cards based on layout */}
-            {layout === "list" && (
-              <div className="space-y-4">
-                {selectedTopicEmails.map((email) => (
-                  <IssueCard key={email.id} email={email} onClick={handleIssueCardClick} />
-                ))}
+            {emailsLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <p className="text-sm text-muted-foreground">Loading emails...</p>
               </div>
+            ) : selectedTopicEmails.length === 0 ? (
+              <div className="flex items-center justify-center py-8">
+                <p className="text-sm text-muted-foreground">No emails found for this topic</p>
+              </div>
+            ) : (
+              <>
+                {layout === "list" && (
+                  <div className="space-y-4">
+                    {selectedTopicEmails.map((email) => (
+                      <IssueCard key={email.id} email={email} onClick={handleIssueCardClick} />
+                    ))}
+                  </div>
+                )}
+
+                {layout === "grid" && <MasonryGrid emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
+
+                {layout === "stack" && <StackLayout emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
+              </>
             )}
-
-            {layout === "grid" && <MasonryGrid emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
-
-            {layout === "stack" && <StackLayout emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
           </>
         ) : (
           /* All tab */
           <div className="flex flex-col gap-4">
-            {allEmails.map((email) => (
-              <NewsletterCard key={email.id} email={email} />
-            ))}
+            {allEmailsLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <p className="text-sm text-muted-foreground">Loading emails...</p>
+              </div>
+            ) : allEmails.length === 0 ? (
+              <div className="flex items-center justify-center py-8">
+                <p className="text-sm text-muted-foreground">No emails found</p>
+              </div>
+            ) : (
+              allEmails.map((email) => (
+                <NewsletterCard key={email.id} email={email} />
+              ))
+            )}
           </div>
         )}
       </div>
