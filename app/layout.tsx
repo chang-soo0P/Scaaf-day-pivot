@@ -6,10 +6,10 @@ import { Toaster } from "@/components/ui/toaster"
 
 const telma = localFont({
   src: [
-    { path: "/fonts/Telma-Light.woff2", weight: "300" },
-    { path: "/fonts/Telma-Regular.woff2", weight: "400" },
-    { path: "/fonts/Telma-Medium.woff2", weight: "500" },
-    { path: "/fonts/Telma-Bold.woff2", weight: "700" },
+    { path: "/fonts/Telma-Regular.otf", weight: "400", style: "normal" },
+    { path: "/fonts/Telma-Medium.otf", weight: "500", style: "normal" },
+    { path: "/fonts/Telma-Bold.otf", weight: "700", style: "normal" },
+    { path: "/fonts/Telma-Light.otf", weight: "300", style: "normal" },
   ],
   variable: "--font-telma",
 })
@@ -30,9 +30,9 @@ export const viewport: Viewport = {
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode
-}>) {
+}) {
   return (
     <html lang="en">
       <body className={`${telma.variable} font-sans antialiased`}>
