@@ -1,18 +1,8 @@
 import type React from "react"
 import type { Metadata, Viewport } from "next"
-import localFont from "next/font/local"
 import "./globals.css"
+import "./fonts/telma.css" // ← Base64 → woff2 폰트 정의 파일
 import { Toaster } from "@/components/ui/toaster"
-
-const telma = localFont({
-  src: [
-    { path: "/fonts/Telma-Regular.otf", weight: "400", style: "normal" },
-    { path: "/fonts/Telma-Medium.otf", weight: "500", style: "normal" },
-    { path: "/fonts/Telma-Bold.otf", weight: "700", style: "normal" },
-    { path: "/fonts/Telma-Light.otf", weight: "300", style: "normal" },
-  ],
-  variable: "--font-telma",
-})
 
 export const metadata: Metadata = {
   title: "Scaaf Day",
@@ -35,7 +25,8 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className={`${telma.variable} font-sans antialiased`}>
+      {/* Telma를 기본 폰트로 지정 */}
+      <body className="font-sans antialiased" style={{ fontFamily: "Telma, sans-serif" }}>
         {children}
         <Toaster />
       </body>
