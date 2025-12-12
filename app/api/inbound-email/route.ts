@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { simpleParser } from 'mailparser'
 import { supabase } from '@/lib/supabase'
+import { processInboundEmail } from '@/lib/actions'
 
 export async function POST(request: NextRequest) {
   try {
@@ -75,10 +76,29 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    // Process email asynchronously (summary + topic classification)
+    // Don't await - return response immediately and process in background
+    processInboundEmail(data.id)
+      .then((result) => {
+        if (result.success) {
+          console.log(`Email ${data.id} processed successfully:`, {
+            summary: result.summary?.success ? 'created' : 'failed',
+            topics: result.topics?.success 
+              ? `classified as: ${result.topics.topicNames?.join(', ')}`
+              : 'failed',
+          })
+        } else {
+          console.error(`Email ${data.id} processing failed:`, result.error)
+        }
+      })
+      .catch((err) => {
+        console.error(`Error in background processing for email ${data.id}:`, err)
+      })
+
     return NextResponse.json(
       { 
         success: true, 
-        message: 'Email processed and saved',
+        message: 'Email processed and saved. Summary and topic classification in progress.',
         email_id: data.id 
       },
       { status: 200 }

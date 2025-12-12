@@ -22,6 +22,24 @@ interface TopicClassificationResult {
   error?: string
 }
 
+interface ProcessInboundEmailResult {
+  success: boolean
+  emailId: string
+  summary?: {
+    success: boolean
+    summary?: string
+    bullets?: string[]
+    error?: string
+  }
+  topics?: {
+    success: boolean
+    topicIds?: string[]
+    topicNames?: string[]
+    error?: string
+  }
+  error?: string
+}
+
 /**
  * Create email summary and bullet points using OpenAI
  * @param emailId - The ID of the email to summarize
@@ -368,6 +386,49 @@ Only include topics that are directly relevant to the email content. If multiple
     console.error('Error classifying topics:', error)
     return {
       success: false,
+      error: error instanceof Error ? error.message : 'Unknown error occurred',
+    }
+  }
+}
+
+/**
+ * Process inbound email: create summary and classify topics
+ * This function orchestrates the full processing pipeline for a newly received email
+ * @param emailId - The ID of the email to process
+ * @returns Processing results including summary and topic classification
+ */
+export async function processInboundEmail(emailId: string): Promise<ProcessInboundEmailResult> {
+  try {
+    // Step 1: Create email summary
+    const summaryResult = await createEmailSummary(emailId)
+    
+    // Step 2: Classify topics (even if summary failed, we can still try to classify)
+    const topicsResult = await classifyTopics(emailId)
+
+    // Determine overall success
+    const overallSuccess = summaryResult.success || topicsResult.success
+
+    if (!overallSuccess) {
+      return {
+        success: false,
+        emailId,
+        summary: summaryResult,
+        topics: topicsResult,
+        error: `Processing failed. Summary: ${summaryResult.error || 'success'}, Topics: ${topicsResult.error || 'success'}`,
+      }
+    }
+
+    return {
+      success: true,
+      emailId,
+      summary: summaryResult,
+      topics: topicsResult,
+    }
+  } catch (error) {
+    console.error('Error processing inbound email:', error)
+    return {
+      success: false,
+      emailId,
       error: error instanceof Error ? error.message : 'Unknown error occurred',
     }
   }
