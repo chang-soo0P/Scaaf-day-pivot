@@ -390,3 +390,4 @@ export async function getTodayActivity(topicId: string): Promise<{
   return { newHighlightsToday, newCommentsToday }
 }
 
+
