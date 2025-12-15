@@ -1,23 +1,50 @@
-// app/api/inbound-email/mailgun/inbound/route.ts
+import { NextResponse } from "next/server"
+import { createClient } from "@supabase/supabase-js"
 
-import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
+
+// ✅ 헬스체크(브라우저로 열어도 200)
+export async function GET() {
+  return NextResponse.json({ ok: true, route: "mailgun-inbound" }, { status: 200 })
+}
+
+// ✅ HEAD/OPTIONS도 200으로 응답(405 방지)
+export async function HEAD() {
+  return new NextResponse(null, { status: 200 })
+}
+export async function OPTIONS() {
+  return new NextResponse(null, { status: 200 })
+}
 
 export async function POST(req: Request) {
   try {
-    const body = await req.formData();
+    const body = await req.formData()
 
-    const from = body.get("from")?.toString() || "";
-    const to = body.get("recipient")?.toString() || "";
-    const subject = body.get("subject")?.toString() || "";
-    const bodyPlain = body.get("body-plain")?.toString() || "";
-    const bodyHtml = body.get("body-html")?.toString() || "";
-    const timestamp = body.get("timestamp")?.toString() || "";
+    // Mailgun payload (환경/설정에 따라 recipient 대신 to로 올 수도 있어 방어)
+    const from = String(body.get("from") ?? "")
+    const to = String(body.get("recipient") ?? body.get("to") ?? "")
+    const subject = String(body.get("subject") ?? "")
+    const bodyPlain = String(body.get("body-plain") ?? "")
+    const bodyHtml = String(body.get("body-html") ?? "")
+    const tsRaw = body.get("timestamp")
+    const receivedAt = tsRaw
+      ? new Date(Number(tsRaw) * 1000).toISOString()
+      : new Date().toISOString()
 
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    );
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
+    if (!supabaseUrl || !serviceKey) {
+      return NextResponse.json(
+        { ok: false, error: "Missing Supabase env vars on server" },
+        { status: 500 }
+      )
+    }
+
+    const supabase = createClient(supabaseUrl, serviceKey, {
+      auth: { persistSession: false },
+    })
 
     const { data, error } = await supabase
       .from("inbox_emails")
@@ -27,21 +54,22 @@ export async function POST(req: Request) {
         subject,
         body_text: bodyPlain,
         body_html: bodyHtml,
-        received_at: new Date(Number(timestamp) * 1000).toISOString(),
+        received_at: receivedAt,
       })
-      .select();
+      .select()
+      .single()
 
     if (error) {
-      console.error("Supabase insert error:", error);
-      return NextResponse.json({ ok: false, error }, { status: 500 });
+      console.error("Supabase insert error:", error)
+      return NextResponse.json(
+        { ok: false, error: error.message },
+        { status: 500 }
+      )
     }
 
-    return NextResponse.json({ ok: true, data }, { status: 200 });
+    return NextResponse.json({ ok: true, id: data?.id }, { status: 200 })
   } catch (err) {
-    console.error("Webhook error:", err);
-    return NextResponse.json({ ok: false, err }, { status: 500 });
+    console.error("Webhook error:", err)
+    return NextResponse.json({ ok: false }, { status: 500 })
   }
 }
-
-// ❗ 중요: 절대로 GET/HANDLER 같은 export 하지 말 것
-// Next.js는 GET이 있으면 GET 우선해서 POST를 받지 못함
