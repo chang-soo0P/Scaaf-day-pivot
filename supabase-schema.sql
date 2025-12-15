@@ -356,3 +356,4 @@ LEFT JOIN highlights h ON e.id = h.email_id
 LEFT JOIN comments c ON e.id = c.email_id
 LEFT JOIN email_topics et ON e.id = et.email_id
 GROUP BY e.id;
+

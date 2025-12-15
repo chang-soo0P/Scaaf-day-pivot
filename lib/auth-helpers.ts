@@ -49,3 +49,4 @@ export async function getServerUserId(): Promise<string | null> {
   const user = await getServerUser()
   return user?.id || null
 }
+

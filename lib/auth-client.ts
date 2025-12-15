@@ -38,3 +38,4 @@ export async function getClientUser() {
   } = await supabaseClient.auth.getUser()
   return user
 }
+
