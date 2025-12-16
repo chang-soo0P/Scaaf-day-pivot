@@ -52,13 +52,17 @@ export async function POST(req: Request) {
     const token = String(body.get("token") ?? "")
     const signature = String(body.get("signature") ?? "")
 
-    const signingKey = process.env.MAILGUN_WEBHOOK_SIGNING_KEY || process.env.MAILGUN_PRIVATE_API_KEY
+    const signingKey =
+      process.env.MAILGUN_WEBHOOK_SIGNING_KEY || process.env.MAILGUN_PRIVATE_API_KEY
     const disableSigCheck = process.env.MAILGUN_DISABLE_SIGNATURE_CHECK === "true"
 
     if (!disableSigCheck) {
       if (!signingKey) {
         return NextResponse.json(
-          { ok: false, error: "Missing MAILGUN_WEBHOOK_SIGNING_KEY (or MAILGUN_PRIVATE_API_KEY)" },
+          {
+            ok: false,
+            error: "Missing MAILGUN_WEBHOOK_SIGNING_KEY (or MAILGUN_PRIVATE_API_KEY)",
+          },
           { status: 500 }
         )
       }
@@ -80,7 +84,9 @@ export async function POST(req: Request) {
     const subject = String(body.get("subject") ?? "")
     const bodyText = String(body.get("stripped-text") ?? body.get("body-plain") ?? "")
     const bodyHtml = String(body.get("stripped-html") ?? body.get("body-html") ?? "")
-    const messageId = String(body.get("Message-Id") ?? body.get("message-id") ?? body.get("Message-ID") ?? "")
+    const messageId = String(
+      body.get("Message-Id") ?? body.get("message-id") ?? body.get("Message-ID") ?? ""
+    )
 
     const fromAddress = extractFirstEmail(fromRaw)
     const toAddress = extractFirstEmail(toRaw)
@@ -136,3 +142,21 @@ export async function POST(req: Request) {
         body_html: bodyHtml,
         message_id: messageId || null,
         received_at: receivedAt,
+      }) // ✅ 누락되기 쉬운 닫힘 포인트
+      .select("id")
+      .single()
+
+    if (error) {
+      console.error("Supabase insert error:", error)
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+    }
+
+    return NextResponse.json(
+      { ok: true, id: data?.id, mapped: Boolean(user_id), user_id },
+      { status: 200 }
+    )
+  } catch (err) {
+    console.error("Webhook error:", err)
+    return NextResponse.json({ ok: false, error: "Webhook error" }, { status: 500 })
+  }
+}
