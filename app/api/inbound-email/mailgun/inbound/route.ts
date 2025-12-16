@@ -19,7 +19,6 @@ export async function OPTIONS() {
 }
 
 function extractFirstEmail(raw: string): string {
-  // "Name <email@domain>" / "email@domain" / "a@b, c@d" 모두 대응
   const m = raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
   return (m?.[0] ?? "").toLowerCase()
 }
@@ -36,7 +35,6 @@ function verifyMailgunSignature(params: {
     .update(timestamp + token)
     .digest("hex")
 
-  // timing-safe 비교
   const a = Buffer.from(expected)
   const b = Buffer.from(signature || "")
   if (a.length !== b.length) return false
@@ -45,11 +43,7 @@ function verifyMailgunSignature(params: {
 
 async function logEvent(
   supabase: ReturnType<typeof createClient> | null,
-  evt: {
-    status: number
-    note: string
-    payload?: Record<string, any>
-  }
+  evt: { status: number; note: string; payload?: Record<string, any> }
 ) {
   if (!supabase) return
   try {
@@ -62,29 +56,48 @@ async function logEvent(
       payload: evt.payload ?? null,
     })
   } catch {
-    // 로깅 실패는 무시 (본 로직에 영향 X)
+    // ignore
   }
 }
 
+async function relayToProduction(original: FormData) {
+  const prodUrl =
+    process.env.PROD_INBOUND_URL ||
+    "https://scaaf.day/api/inbound-email/mailgun/inbound"
+
+  // 무한 루프 방지용 헤더
+  const res = await fetch(prodUrl, {
+    method: "POST",
+    headers: {
+      "x-scaaf-relay": "1",
+    },
+    body: original, // Mailgun 원본 FormData 그대로 전달(서명 검증도 통과 가능)
+  })
+
+  const text = await res.text()
+  return { status: res.status, text }
+}
+
 export async function POST(req: Request) {
-  // ✅ Supabase 클라이언트는 최대한 빨리 만들고, 이후 모든 단계에서 로그를 남길 수 있게 함
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
-
   const supabase =
     supabaseUrl && serviceKey
       ? createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } })
       : null
 
   try {
+    // ✅ 무한 relay 방지: prod -> dev로 다시 오거나, dev가 prod로 전달한 요청이면 그냥 처리/중단
+    const relayed = req.headers.get("x-scaaf-relay") === "1"
+
     const body = await req.formData()
 
-    // ✅ Mailgun signature fields (보통 최상위로 들어옴)
+    // Mailgun signature fields
     const timestamp = String(body.get("timestamp") ?? "")
     const token = String(body.get("token") ?? "")
     const signature = String(body.get("signature") ?? "")
 
-    // ✅ payload fields (설정/플랜/route 옵션에 따라 키가 조금씩 다를 수 있어 방어)
+    // payload fields
     const fromRaw = String(body.get("from") ?? "")
     const toRaw =
       String(body.get("recipient") ?? "") ||
@@ -106,23 +119,22 @@ export async function POST(req: Request) {
       ? new Date(Number(timestamp) * 1000).toISOString()
       : new Date().toISOString()
 
-    // ✅ “요청이 들어왔는지” 여부를 확실히 기록
     await logEvent(supabase, {
       status: 100,
       note: "hit",
       payload: {
-        hasTimestamp: Boolean(timestamp),
-        hasToken: Boolean(token),
-        hasSignature: Boolean(signature),
+        relayed,
         toRaw,
         toAddress,
         subject,
+        hasTimestamp: Boolean(timestamp),
+        hasToken: Boolean(token),
+        hasSignature: Boolean(signature),
       },
     })
 
-    // ✅ Supabase env 체크 (없으면 여기서 바로 종료)
-    if (!supabaseUrl || !serviceKey || !supabase) {
-      await logEvent(null, { status: 500, note: "missing_supabase_env" })
+    // ✅ Supabase env 없으면 여기서 종료(로그도 못 남길 수 있음)
+    if (!supabase) {
       return NextResponse.json(
         { ok: false, error: "Missing Supabase env vars on server" },
         { status: 500 }
@@ -138,14 +150,10 @@ export async function POST(req: Request) {
       if (!signingKey) {
         await logEvent(supabase, { status: 500, note: "missing_mailgun_signing_key" })
         return NextResponse.json(
-          {
-            ok: false,
-            error: "Missing MAILGUN_WEBHOOK_SIGNING_KEY (or MAILGUN_PRIVATE_API_KEY)",
-          },
+          { ok: false, error: "Missing MAILGUN_WEBHOOK_SIGNING_KEY (or MAILGUN_PRIVATE_API_KEY)" },
           { status: 500 }
         )
       }
-
       const ok = verifyMailgunSignature({ timestamp, token, signature, signingKey })
       if (!ok) {
         await logEvent(supabase, { status: 401, note: "invalid_signature" })
@@ -155,7 +163,21 @@ export async function POST(req: Request) {
       await logEvent(supabase, { status: 101, note: "signature_check_disabled" })
     }
 
-    // ✅ 11단계: to_address → user_id 매핑 (user_addresses 테이블)
+    // ✅ 분기 기준(테스트 prefix)
+    // 발급된 테스트 주소 prefix: 273fcf3e.
+    const TEST_PREFIX = "273fcf3e."
+    const isDevTest = toAddress.startsWith(TEST_PREFIX)
+
+    // ✅ 운영 유지: 테스트 주소가 아니면 운영으로 그대로 전달 (Route 1개로 B 구현)
+    // relayed 요청은 다시 relay하지 않음(루프 방지)
+    if (!isDevTest && !relayed) {
+      await logEvent(supabase, { status: 120, note: "relay_to_prod" })
+      const { status, text } = await relayToProduction(body)
+      await logEvent(supabase, { status, note: "relay_result", payload: { status } })
+      return new NextResponse(text, { status })
+    }
+
+    // ✅ 여기부터는 "dev 테스트" 또는 "이미 relay된 요청"만 dev에서 처리
     let user_id: string | null = null
     let address_id: string | null = null
 
@@ -184,7 +206,6 @@ export async function POST(req: Request) {
       payload: { toAddress, mapped: Boolean(user_id), user_id, address_id },
     })
 
-    // ✅ 저장
     const { data, error } = await supabase
       .from("inbox_emails")
       .insert({
@@ -221,6 +242,7 @@ export async function POST(req: Request) {
       { status: 200 }
     )
   } catch (err: any) {
+    console.error("Webhook error:", err)
     if (supabase) {
       await logEvent(supabase, {
         status: 500,
@@ -228,7 +250,6 @@ export async function POST(req: Request) {
         payload: { message: err?.message ?? String(err) },
       })
     }
-    console.error("Webhook error:", err)
     return NextResponse.json({ ok: false, error: "Webhook error" }, { status: 500 })
   }
 }
