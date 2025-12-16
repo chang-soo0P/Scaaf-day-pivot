@@ -1,12 +1,16 @@
-import { createServerClient } from '@supabase/ssr'
-import { cookies } from 'next/headers'
-import { NextResponse, type NextRequest } from 'next/server'
+import { createServerClient } from "@supabase/ssr"
+import { cookies } from "next/headers"
+import { NextResponse, type NextRequest } from "next/server"
 
 export async function GET(request: NextRequest) {
   const requestUrl = new URL(request.url)
-  const code = requestUrl.searchParams.get('code')
-  const redirectTo = requestUrl.searchParams.get('redirect') || '/inbox'
-  const next = requestUrl.searchParams.get('next') || redirectTo
+  const code = requestUrl.searchParams.get("code")
+
+  const redirectTo = requestUrl.searchParams.get("redirect") || "/inbox"
+  const next = requestUrl.searchParams.get("next") || redirectTo
+
+  // ✅ B) open redirect 방지: 내부 경로만 허용
+  const safeNext = next.startsWith("/") ? next : "/inbox"
 
   if (code) {
     const cookieStore = await cookies()
@@ -24,21 +28,28 @@ export async function GET(request: NextRequest) {
                 cookieStore.set(name, value, options)
               )
             } catch {
-              // The `setAll` method was called from a Server Component.
-              // This can be ignored if you have middleware refreshing
-              // user sessions.
+              // Server Component에서 호출된 경우 무시 가능
             }
           },
         },
       }
     )
-    await supabase.auth.exchangeCodeForSession(code)
+
+    // ✅ A) exchangeCodeForSession 에러 처리
+    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    if (error) {
+      return NextResponse.redirect(
+        new URL(
+          `/auth/login?error=${encodeURIComponent(error.message)}`,
+          request.url
+        )
+      )
+    }
+  } else {
+    // code가 없으면 로그인으로 돌려버리면 디버깅이 쉬움
+    return NextResponse.redirect(new URL("/auth/login?error=missing_code", request.url))
   }
 
   // URL to redirect to after sign in process completes
-  return NextResponse.redirect(new URL(next, request.url))
+  return NextResponse.redirect(new URL(safeNext, request.url))
 }
-
-
-
-
