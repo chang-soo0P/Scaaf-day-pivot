@@ -14,7 +14,9 @@ export default function LoginClient() {
   const [loading, setLoading] = useState(false)
   const [emailSent, setEmailSent] = useState(false)
 
-  const redirectTo = searchParams.get("redirect") || "/inbox"
+  const redirectToRaw = searchParams.get("redirect") || "/inbox"
+  const redirectTo = redirectToRaw.startsWith("/") ? redirectToRaw : "/inbox"
+
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
