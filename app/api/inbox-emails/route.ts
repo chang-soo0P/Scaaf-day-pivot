@@ -1,6 +1,5 @@
 "use client"
-
-import { useEffect, useMemo, useState } from "react"
+import { useState, useEffect } from "react"
 import Image from "next/image"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -22,172 +21,80 @@ import {
 } from "lucide-react"
 import { motion, AnimatePresence, LayoutGroup } from "framer-motion"
 import { ShineBorder } from "@/components/ui/shine-border"
+import {
+  getAllTopics,
+  getEmailsByTopicId,
+  getTopicStats,
+  getTodayActivity,
+  getTopicById,
+  getEmailsWithRelations,
+  type Email,
+  type TopicInfo,
+  type Reaction,
+} from "@/lib/supabase-queries"
 import { useDailyMissionStore } from "@/lib/daily-mission-store"
 
-// --- Types (UI용 최소 타입) ---
+// --- Types ---
 type TabType = "byTopics" | "all"
 type LayoutMode = "stack" | "grid" | "list"
 
-type Reaction = { emoji: string; count: number }
-type Comment = { reactions: Reaction[] }
-type Email = {
-  id: string
-  senderName: string
-  newsletterTitle: string
-  snippet: string
-  receivedAt: string
-  issueImageEmoji?: string | null
-  hasAdSegment?: boolean
-  topics: string[]
-  highlights: any[]
-  comments: Comment[]
-}
-
-type TopicInfo = {
-  id: string
-  name: string
-  summary: string
-  keyPoints: string[]
-  newsletterCount: number
-  newCommentsToday: number
-  newHighlightsToday: number
-}
-
-type InboxEmailRow = {
-  id: string
-  from_address: string | null
-  subject: string | null
-  body_text: string | null
-  body_html: string | null
-  received_at: string | null
-  raw: any
-}
-
-// --- helpers ---
-function safeDomain(from: string) {
-  const email = (from.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? "").toLowerCase()
-  const domain = email.split("@")[1] ?? ""
-  return domain || "unknown"
-}
-
-function formatTime(iso: string | null) {
-  if (!iso) return ""
-  try {
-    return new Date(iso).toLocaleString()
-  } catch {
-    return iso
-  }
-}
-
-function makeSnippet(text: string | null) {
-  const t = (text ?? "").replace(/\s+/g, " ").trim()
-  return t.length > 140 ? `${t.slice(0, 140)}…` : t
-}
-
-const topicEmojiPool = ["🧠", "📈", "🛠️", "📰", "🧪", "🚀", "💡", "🎯", "🌿", "🔮"]
-
-function emojiForKey(key: string) {
-  let h = 0
-  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0
-  return topicEmojiPool[h % topicEmojiPool.length]
-}
-
-function toTopicId(name: string) {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")
-}
-
-// --- fetch hook ---
-function useInboxEmails(limit = 200) {
-  const [rows, setRows] = useState<InboxEmailRow[]>([])
+// --- Derived data from Supabase ---
+function useTopicData() {
+  const [topicsWithStats, setTopicsWithStats] = useState<Array<TopicInfo & {
+    newsletterCount: number
+    newCommentsToday: number
+    newHighlightsToday: number
+  }>>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    let mounted = true
-    async function run() {
+    async function fetchData() {
       try {
-        setLoading(true)
-        const res = await fetch(`/api/inbox-emails?limit=${limit}`, { cache: "no-store" })
-        const json = await res.json()
-        if (!mounted) return
-        if (!res.ok) {
-          console.error("Failed to load inbox emails:", json)
-          setRows([])
-          return
-        }
-        setRows(json.emails ?? [])
-      } catch (e) {
-        console.error(e)
-        if (mounted) setRows([])
+        const allTopics = await getAllTopics()
+        const topicsWithStatsData = await Promise.all(
+          allTopics.map(async (topic) => {
+            const stats = await getTopicStats(topic.id)
+            const todayActivity = await getTodayActivity(topic.id)
+            return {
+              ...topic,
+              newsletterCount: stats.newsletterCount,
+              newCommentsToday: todayActivity.newCommentsToday,
+              newHighlightsToday: todayActivity.newHighlightsToday,
+            }
+          })
+        )
+        setTopicsWithStats(topicsWithStatsData)
+      } catch (error) {
+        console.error('Error fetching topic data:', error)
       } finally {
-        if (mounted) setLoading(false)
+        setLoading(false)
       }
     }
-    run()
-    return () => {
-      mounted = false
+    fetchData()
+  }, [])
+
+  return { topicsWithStats, loading }
+}
+
+function useEmailsForTopic(topicId: string) {
+  const [emails, setEmails] = useState<Email[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    async function fetchData() {
+      try {
+        const data = await getEmailsByTopicId(topicId)
+        setEmails(data)
+      } catch (error) {
+        console.error('Error fetching emails:', error)
+      } finally {
+        setLoading(false)
+      }
     }
-  }, [limit])
+    fetchData()
+  }, [topicId])
 
-  return { rows, loading }
-}
-
-// --- Derived data from inbox_emails ---
-function rowsToUiEmails(rows: InboxEmailRow[]): Email[] {
-  return rows.map((r) => {
-    const from = r.from_address ?? "Unknown"
-    const domain = safeDomain(from)
-    const topic = domain === "unknown" ? "Other" : domain
-    const title = r.subject ?? "(no subject)"
-    const snippet = makeSnippet(r.body_text ?? null)
-
-    return {
-      id: r.id,
-      senderName: from,
-      newsletterTitle: title,
-      snippet,
-      receivedAt: formatTime(r.received_at),
-      issueImageEmoji: emojiForKey(domain),
-      hasAdSegment: false,
-      topics: [topic],
-      highlights: [],
-      comments: [],
-    }
-  })
-}
-
-function buildTopics(emails: Email[]): TopicInfo[] {
-  const map = new Map<string, Email[]>()
-  emails.forEach((e) => {
-    const t = e.topics[0] ?? "Other"
-    if (!map.has(t)) map.set(t, [])
-    map.get(t)!.push(e)
-  })
-
-  const topics: TopicInfo[] = []
-  for (const [name, list] of map.entries()) {
-    const id = toTopicId(name)
-    const latestSubjects = list
-      .slice(0, 5)
-      .map((x) => x.newsletterTitle)
-      .filter(Boolean)
-
-    topics.push({
-      id,
-      name,
-      newsletterCount: list.length,
-      newCommentsToday: 0,
-      newHighlightsToday: 0,
-      summary: `Auto topic generated from sender domain (${name}). ${list.length} newsletters currently.`,
-      keyPoints: latestSubjects.length ? latestSubjects : ["No subjects yet"],
-    })
-  }
-
-  topics.sort((a, b) => b.newsletterCount - a.newsletterCount)
-  return topics
-}
-
-function filterEmailsByTopicId(emails: Email[], topicId: string) {
-  return emails.filter((e) => toTopicId(e.topics[0] ?? "other") === topicId)
+  return { emails, loading }
 }
 
 // --- Layout Icons ---
@@ -213,6 +120,7 @@ function IssueCard({
     commentCount: email.comments.length,
   }
 
+  // Calculate top reaction from comments
   const reactionCounts: Record<string, number> = {}
   email.comments.forEach((comment) => {
     comment.reactions.forEach((r) => {
@@ -235,13 +143,14 @@ function IssueCard({
       }}
       className="flex items-center gap-3 rounded-2xl bg-card p-3 shadow-sm ring-1 ring-border/60 cursor-pointer hover:shadow-md transition-shadow"
     >
+      {/* Left: Text Content */}
       <div className="flex-1 min-w-0">
         <p className="text-xs text-muted-foreground mb-0.5">{email.senderName}</p>
         <h4 className="text-sm font-semibold text-foreground leading-snug line-clamp-2 mb-1">
           {email.newsletterTitle}
         </h4>
         <p className="text-xs text-muted-foreground line-clamp-2 mb-2">{email.snippet}</p>
-
+        {/* Reactions/meta row */}
         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
           {stats.highlightCount > 0 && (
             <span className="flex items-center gap-0.5">
@@ -263,6 +172,7 @@ function IssueCard({
         </div>
       </div>
 
+      {/* Right: Emoji Thumbnail */}
       {email.issueImageEmoji && (
         <div className="relative h-16 w-16 shrink-0 rounded-xl bg-gradient-to-br from-secondary to-secondary/50 flex items-center justify-center">
           <span className="text-2xl">{email.issueImageEmoji}</span>
@@ -278,6 +188,7 @@ function NewsletterCard({ email }: { email: Email }) {
     commentCount: email.comments.length,
   }
 
+  // Calculate top reaction
   const reactionCounts: Record<string, number> = {}
   email.comments.forEach((comment) => {
     comment.reactions.forEach((r) => {
@@ -299,9 +210,7 @@ function NewsletterCard({ email }: { email: Email }) {
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-xs font-medium text-muted-foreground">{email.senderName}</p>
-            <h3 className="mt-1 text-sm font-semibold text-foreground line-clamp-2">
-              {email.newsletterTitle}
-            </h3>
+            <h3 className="mt-1 text-sm font-semibold text-foreground line-clamp-2">{email.newsletterTitle}</h3>
             <div className="mt-1.5 flex flex-wrap gap-1">
               {email.topics.map((topic) => (
                 <span
@@ -334,9 +243,7 @@ function NewsletterCard({ email }: { email: Email }) {
           )}
           {topEmoji && <span>{topEmoji}</span>}
           {email.hasAdSegment && (
-            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">
-              Ad
-            </span>
+            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">Ad</span>
           )}
         </div>
       </div>
@@ -360,11 +267,17 @@ function TopicNewsletterCard({
   return (
     <Link href={`/inbox/${newsletter.id}`}>
       <div className="flex gap-3 rounded-2xl bg-card p-3 shadow-sm ring-1 ring-border transition-shadow hover:shadow-md">
+        {/* Left side - text content */}
         <div className="flex flex-1 min-w-0 flex-col justify-between">
+          {/* Source name */}
           <span className="text-xs text-muted-foreground truncate mb-1">{newsletter.name}</span>
+
+          {/* Large bold subject/headline */}
           <h3 className="text-base font-semibold leading-snug line-clamp-2 text-card-foreground">
             {newsletter.subject}
           </h3>
+
+          {/* Topic chip and time */}
           <div className="flex items-center gap-2 mt-2">
             <span className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary">
               {newsletter.topic}
@@ -373,6 +286,7 @@ function TopicNewsletterCard({
           </div>
         </div>
 
+        {/* Right side - thumbnail */}
         <div className="relative h-20 w-24 flex-shrink-0 overflow-hidden rounded-xl bg-secondary">
           <Image src={newsletter.thumbnail || "/placeholder.svg"} alt="" fill className="object-cover" />
         </div>
@@ -381,7 +295,7 @@ function TopicNewsletterCard({
   )
 }
 
-// --- Topic Detail View ---
+// --- Topic Detail View (AI Summary + Key Points + Newsletters) ---
 function TopicDetailView({
   topic,
   emails,
@@ -395,6 +309,7 @@ function TopicDetailView({
 
   return (
     <div className="flex flex-col min-h-full">
+      {/* Header with back button */}
       <div className="sticky top-0 z-10 bg-background pt-4 pb-2 px-4">
         <button
           onClick={onBack}
@@ -406,14 +321,16 @@ function TopicDetailView({
       </div>
 
       <div className="flex-1 px-4 pb-24">
+        {/* Topic Heading */}
         <div className="mb-4">
           <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
             <Hash className="h-6 w-6" />
             {topic.name}
           </h1>
-          <p className="text-sm text-muted-foreground mt-1">{emails.length} newsletters</p>
+          <p className="text-sm text-muted-foreground mt-1">{emails.length} newsletters this week</p>
         </div>
 
+        {/* AI Summary Card with ShineBorder */}
         <ShineBorder
           className="mb-6 rounded-2xl bg-card p-4"
           color={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
@@ -431,6 +348,7 @@ function TopicDetailView({
           <p className="text-sm text-foreground/90 leading-relaxed">{topic.summary}</p>
         </ShineBorder>
 
+        {/* Key Points */}
         <div className="mb-6">
           <h3 className="text-sm font-semibold text-foreground mb-3">Key Points</h3>
           <ul className="space-y-2">
@@ -443,11 +361,13 @@ function TopicDetailView({
           </ul>
         </div>
 
+        {/* Share to Circle button */}
         <button className="w-full mb-6 flex items-center justify-center gap-2 rounded-xl bg-secondary py-3 text-sm font-medium text-secondary-foreground hover:bg-secondary/80 transition-colors">
           <Share2 className="h-4 w-4" />
           Share to circle
         </button>
 
+        {/* From these newsletters */}
         <div>
           <h3 className="text-sm font-semibold text-foreground mb-3">From these newsletters</h3>
           <div className="space-y-3">
@@ -476,7 +396,13 @@ function TopicDetailView({
   )
 }
 
-function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (emailId: string) => void }) {
+function StackLayout({
+  emails,
+  onCardClick,
+}: {
+  emails: Email[]
+  onCardClick: (emailId: string) => void
+}) {
   const [currentIndex, setCurrentIndex] = useState(0)
   const [isDragging, setIsDragging] = useState(false)
 
@@ -486,13 +412,20 @@ function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (e
     const offset = info.offset.x
 
     if (Math.abs(offset) > threshold || Math.abs(velocity) > 500) {
+      // Move to next card
       setCurrentIndex((prev) => (prev + 1) % emails.length)
     }
-    setTimeout(() => setIsDragging(false), 100)
+
+    // Add slight delay before resetting isDragging to prevent click
+    setTimeout(() => {
+      setIsDragging(false)
+    }, 100)
   }
 
   const visibleCards = emails.slice(currentIndex, currentIndex + 3)
-  if (visibleCards.length < 3) visibleCards.push(...emails.slice(0, 3 - visibleCards.length))
+  if (visibleCards.length < 3) {
+    visibleCards.push(...emails.slice(0, 3 - visibleCards.length))
+  }
 
   return (
     <div className="relative h-[280px] w-full">
@@ -500,6 +433,7 @@ function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (e
         <AnimatePresence mode="popLayout">
           {visibleCards.map((email, index) => {
             const isTop = index === 0
+
             return (
               <motion.div
                 key={`${email.id}-${currentIndex}-${index}`}
@@ -512,7 +446,11 @@ function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (e
                   opacity: 1 - index * 0.2,
                 }}
                 exit={{ x: 300, opacity: 0, scale: 0.9 }}
-                transition={{ type: "spring", stiffness: 300, damping: 25 }}
+                transition={{
+                  type: "spring",
+                  stiffness: 300,
+                  damping: 25,
+                }}
                 drag={isTop ? "x" : false}
                 dragConstraints={{ left: 0, right: 0 }}
                 dragElastic={0.7}
@@ -528,6 +466,7 @@ function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (e
         </AnimatePresence>
       </LayoutGroup>
 
+      {/* Pagination dots */}
       <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 flex gap-1.5">
         {emails.map((_, idx) => (
           <button
@@ -544,13 +483,22 @@ function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (e
   )
 }
 
-function MasonryGrid({ emails, onCardClick }: { emails: Email[]; onCardClick: (emailId: string) => void }) {
+function MasonryGrid({
+  emails,
+  onCardClick,
+}: {
+  emails: Email[]
+  onCardClick: (emailId: string) => void
+}) {
   const leftColumn: Email[] = []
   const rightColumn: Email[] = []
 
   emails.forEach((email, index) => {
-    if (index % 2 === 0) leftColumn.push(email)
-    else rightColumn.push(email)
+    if (index % 2 === 0) {
+      leftColumn.push(email)
+    } else {
+      rightColumn.push(email)
+    }
   })
 
   return (
@@ -569,11 +517,26 @@ function MasonryGrid({ emails, onCardClick }: { emails: Email[]; onCardClick: (e
   )
 }
 
+// Emoji background gradients
+const emojiGradients = [
+  "from-violet-400 to-purple-500",
+  "from-sky-400 to-blue-500",
+  "from-emerald-400 to-teal-500",
+  "from-amber-400 to-orange-500",
+  "from-rose-400 to-pink-500",
+  "from-indigo-400 to-blue-600",
+]
+
+function getGradientForIndex(index: number) {
+  return emojiGradients[index % emojiGradients.length]
+}
+
 // --- Retention Header Components ---
 function TodaysDigestCard({ onOpenToday }: { onOpenToday: () => void }) {
+  // Mock data for today's activity
   const todayStats = {
-    issuesCount: 0,
-    commentsCount: 0,
+    issuesCount: 7,
+    commentsCount: 12,
     topTopic: "AI",
   }
 
@@ -586,11 +549,12 @@ function TodaysDigestCard({ onOpenToday }: { onOpenToday: () => void }) {
         <div className="flex-1">
           <h3 className="text-sm font-semibold text-foreground">Today's Digest</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Your newsletters are arriving. This card will become “daily summary” later.
+            Your friends are active! 3 new highlights shared this morning.
           </p>
         </div>
       </div>
 
+      {/* Pills */}
       <div className="flex flex-wrap gap-2 mb-3">
         <span className="inline-flex items-center gap-1 rounded-full bg-card px-2.5 py-1 text-xs font-medium text-foreground ring-1 ring-border">
           <TrendingUp className="h-3 w-3 text-primary" />
@@ -606,11 +570,12 @@ function TodaysDigestCard({ onOpenToday }: { onOpenToday: () => void }) {
         </span>
       </div>
 
+      {/* CTA */}
       <button
         onClick={onOpenToday}
         className="w-full flex items-center justify-center gap-1 rounded-xl bg-primary py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
       >
-        Open today&apos;s emails
+        Open today's emails
         <ChevronRight className="h-4 w-4" />
       </button>
     </div>
@@ -620,7 +585,11 @@ function TodaysDigestCard({ onOpenToday }: { onOpenToday: () => void }) {
 function DailyMissionCard() {
   const { commentsToday, goal, streakCount } = useDailyMissionStore()
 
-  const mission = { title: "Leave 1 comment today", current: commentsToday, target: goal }
+  const mission = {
+    title: "Leave 1 comment today",
+    current: commentsToday,
+    target: goal,
+  }
   const completed = mission.current >= mission.target
   const hasStreakReward = streakCount >= 7
 
@@ -653,6 +622,7 @@ function DailyMissionCard() {
         </div>
       </div>
 
+      {/* Progress bar */}
       <div className="mt-3 h-1.5 rounded-full bg-secondary overflow-hidden">
         <div
           className={cn("h-full rounded-full transition-all duration-500", completed ? "bg-green-500" : "bg-amber-500")}
@@ -670,35 +640,58 @@ export default function InboxPage() {
   const [selectedTopicId, setSelectedTopicId] = useState<string>("")
   const [layout, setLayout] = useState<LayoutMode>("list")
   const [showTopicDetail, setShowTopicDetail] = useState(false)
+  const [allEmails, setAllEmails] = useState<Email[]>([])
   const [selectedTopic, setSelectedTopic] = useState<TopicInfo | null>(null)
+  const [allEmailsLoading, setAllEmailsLoading] = useState(true)
 
-  const { rows, loading } = useInboxEmails(200)
+  const { topicsWithStats, loading: topicsLoading } = useTopicData()
+  const { emails: selectedTopicEmails, loading: emailsLoading } = useEmailsForTopic(selectedTopicId)
 
-  const allEmails: Email[] = useMemo(() => rowsToUiEmails(rows), [rows])
-  const topicsWithStats: TopicInfo[] = useMemo(() => buildTopics(allEmails), [allEmails])
-
-  // init selected topic
+  // Set initial topic ID when topics are loaded
   useEffect(() => {
-    if (topicsWithStats.length > 0 && !selectedTopicId) setSelectedTopicId(topicsWithStats[0].id)
+    if (topicsWithStats.length > 0 && !selectedTopicId) {
+      setSelectedTopicId(topicsWithStats[0].id)
+    }
   }, [topicsWithStats, selectedTopicId])
 
-  // selected topic object
+  // Fetch selected topic details
   useEffect(() => {
-    if (!selectedTopicId) return
-    const t = topicsWithStats.find((x) => x.id === selectedTopicId) ?? null
-    setSelectedTopic(t)
-  }, [selectedTopicId, topicsWithStats])
+    if (selectedTopicId) {
+      getTopicById(selectedTopicId).then(setSelectedTopic)
+    }
+  }, [selectedTopicId])
 
-  const selectedTopicEmails = useMemo(
-    () => (selectedTopicId ? filterEmailsByTopicId(allEmails, selectedTopicId) : []),
-    [allEmails, selectedTopicId]
-  )
+  // Fetch all emails for "All" tab
+  useEffect(() => {
+    async function fetchAllEmails() {
+      try {
+        setAllEmailsLoading(true)
+        const emails = await getEmailsWithRelations()
+        setAllEmails(emails)
+      } catch (error) {
+        console.error('Error fetching all emails:', error)
+      } finally {
+        setAllEmailsLoading(false)
+      }
+    }
+    fetchAllEmails()
+  }, [])
 
-  const handleTopicHeadingClick = () => setShowTopicDetail(true)
-  const handleIssueCardClick = () => setShowTopicDetail(true)
-  const handleOpenTodayEmails = () => setActiveTab("all")
+  const handleTopicHeadingClick = () => {
+    setShowTopicDetail(true)
+  }
 
-  if (loading) {
+  const handleIssueCardClick = () => {
+    // Click on issue card also shows topic detail
+    setShowTopicDetail(true)
+  }
+
+  const handleOpenTodayEmails = () => {
+    setActiveTab("all")
+  }
+
+  // Loading state
+  if (topicsLoading || (selectedTopicId && emailsLoading)) {
     return (
       <div className="flex min-h-full flex-col items-center justify-center">
         <p className="text-sm text-muted-foreground">Loading...</p>
@@ -706,18 +699,16 @@ export default function InboxPage() {
     )
   }
 
+  // If showing topic detail view
   if (showTopicDetail && selectedTopic) {
     return (
-      <TopicDetailView
-        topic={selectedTopic}
-        emails={selectedTopicEmails}
-        onBack={() => setShowTopicDetail(false)}
-      />
+      <TopicDetailView topic={selectedTopic} emails={selectedTopicEmails} onBack={() => setShowTopicDetail(false)} />
     )
   }
 
   return (
     <div className="flex min-h-full flex-col">
+      {/* Header */}
       <div className="px-4 pt-4 pb-2">
         <h1 className="text-2xl font-bold text-foreground">Inbox</h1>
         <p className="text-sm text-muted-foreground">Your newsletters, organized</p>
@@ -728,13 +719,16 @@ export default function InboxPage() {
         <DailyMissionCard />
       </div>
 
+      {/* Tab Switcher */}
       <div className="sticky top-0 z-10 bg-background pt-2 pb-2">
         <div className="mx-4 flex rounded-xl bg-secondary/50 p-1">
           <button
             onClick={() => setActiveTab("byTopics")}
             className={cn(
               "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "byTopics" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              activeTab === "byTopics"
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
             )}
           >
             By topics
@@ -751,9 +745,11 @@ export default function InboxPage() {
         </div>
       </div>
 
+      {/* Content */}
       <div className="flex-1 px-4 pt-4 pb-24">
         {activeTab === "byTopics" ? (
           <>
+            {/* Horizontal topic pills */}
             {topicsWithStats.length > 0 && (
               <div className="flex gap-2 overflow-x-auto pb-4 -mx-4 px-4 scrollbar-hide">
                 {topicsWithStats.map((topic) => (
@@ -762,7 +758,9 @@ export default function InboxPage() {
                     onClick={() => setSelectedTopicId(topic.id)}
                     className={cn(
                       "shrink-0 rounded-full px-4 py-2 text-sm font-medium transition-colors",
-                      selectedTopicId === topic.id ? "bg-foreground text-background" : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+                      selectedTopicId === topic.id
+                        ? "bg-foreground text-background"
+                        : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
                     )}
                   >
                     {topic.name}
@@ -771,17 +769,19 @@ export default function InboxPage() {
               </div>
             )}
 
+            {/* Topic heading and view toggle */}
             <div className="flex items-start justify-between mb-4">
               <button onClick={handleTopicHeadingClick} className="text-left hover:opacity-80 transition-opacity">
                 <h2 className="text-xl font-bold text-foreground flex items-center gap-1">
                   <Hash className="h-5 w-5" />
-                  {topicsWithStats.find((t) => t.id === selectedTopicId)?.name || "Loading..."}
+                  {topicsWithStats.find((t) => t.id === selectedTopicId)?.name || 'Loading...'}
                 </h2>
                 <p className="text-sm text-muted-foreground">
-                  {`${selectedTopicEmails.length} issues`}
+                  {emailsLoading ? 'Loading...' : `${selectedTopicEmails.length} issues today`}
                 </p>
               </button>
 
+              {/* View mode toggle */}
               <div className="flex items-center gap-1 rounded-lg bg-secondary/50 p-1">
                 {(Object.keys(layoutIcons) as LayoutMode[]).map((mode) => {
                   const Icon = layoutIcons[mode]
@@ -791,7 +791,9 @@ export default function InboxPage() {
                       onClick={() => setLayout(mode)}
                       className={cn(
                         "rounded-md p-2 transition-all",
-                        layout === mode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-secondary",
+                        layout === mode
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:text-foreground hover:bg-secondary",
                       )}
                       aria-label={`Switch to ${mode} layout`}
                     >
@@ -802,7 +804,12 @@ export default function InboxPage() {
               </div>
             </div>
 
-            {selectedTopicEmails.length === 0 ? (
+            {/* Issue cards based on layout */}
+            {emailsLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <p className="text-sm text-muted-foreground">Loading emails...</p>
+              </div>
+            ) : selectedTopicEmails.length === 0 ? (
               <div className="flex items-center justify-center py-8">
                 <p className="text-sm text-muted-foreground">No emails found for this topic</p>
               </div>
@@ -815,19 +822,28 @@ export default function InboxPage() {
                     ))}
                   </div>
                 )}
+
                 {layout === "grid" && <MasonryGrid emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
+
                 {layout === "stack" && <StackLayout emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
               </>
             )}
           </>
         ) : (
+          /* All tab */
           <div className="flex flex-col gap-4">
-            {allEmails.length === 0 ? (
+            {allEmailsLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <p className="text-sm text-muted-foreground">Loading emails...</p>
+              </div>
+            ) : allEmails.length === 0 ? (
               <div className="flex items-center justify-center py-8">
                 <p className="text-sm text-muted-foreground">No emails found</p>
               </div>
             ) : (
-              allEmails.map((email) => <NewsletterCard key={email.id} email={email} />)
+              allEmails.map((email) => (
+                <NewsletterCard key={email.id} email={email} />
+              ))
             )}
           </div>
         )}
