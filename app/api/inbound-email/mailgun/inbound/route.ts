@@ -8,9 +8,11 @@ export const dynamic = "force-dynamic"
 export async function GET() {
   return NextResponse.json({ ok: true, route: "mailgun-inbound" }, { status: 200 })
 }
+
 export async function HEAD() {
   return new NextResponse(null, { status: 200 })
 }
+
 export async function OPTIONS() {
   return new NextResponse(null, { status: 200 })
 }
@@ -38,6 +40,15 @@ function verifyMailgunSignature(params: {
   return crypto.timingSafeEqual(a, b)
 }
 
+function formDataToObject(fd: FormData) {
+  const obj: Record<string, any> = {}
+  fd.forEach((value, key) => {
+    if (typeof value === "string") obj[key] = value
+    else obj[key] = { filename: value.name, type: value.type, size: value.size }
+  })
+  return obj
+}
+
 async function logEvent(
   supabase: ReturnType<typeof createClient> | null,
   evt: { status: number; note: string; payload?: Record<string, any> }
@@ -59,7 +70,8 @@ async function logEvent(
 
 async function relayToProduction(original: FormData) {
   const prodUrl =
-    process.env.PROD_INBOUND_URL || "https://scaaf.day/api/inbound-email/mailgun/inbound"
+    process.env.PROD_INBOUND_URL ||
+    "https://scaaf.day/api/inbound-email/mailgun/inbound"
 
   const res = await fetch(prodUrl, {
     method: "POST",
@@ -71,29 +83,21 @@ async function relayToProduction(original: FormData) {
   return { status: res.status, text }
 }
 
-function formDataToObject(fd: FormData) {
-  const obj: Record<string, any> = {}
-  fd.forEach((value, key) => {
-    // Mailgun은 대부분 string이지만, file이 올 수도 있어 방어
-    if (typeof value === "string") obj[key] = value
-    else obj[key] = { filename: value.name, type: value.type, size: value.size }
-  })
-  return obj
-}
-
 export async function POST(req: Request) {
+  // ✅ pause switch
+  if (process.env.INBOUND_PAUSED === "true") {
+    return NextResponse.json({ ok: true, paused: true }, { status: 200 })
+  }
+
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+
   const supabase =
     supabaseUrl && serviceKey
       ? createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } })
       : null
 
   try {
-    if (process.env.INBOUND_PAUSED === "true") {
-      return NextResponse.json({ ok: true, paused: true }, { status: 200 })
-    }
-
     const relayed = req.headers.get("x-scaaf-relay") === "1"
     const body = await req.formData()
 
@@ -159,11 +163,11 @@ export async function POST(req: Request) {
       await logEvent(supabase, { status: 101, note: "signature_check_disabled" })
     }
 
-    // DEV test routing
+    // DEV test routing (테스트 prefix만 dev에 저장)
     const TEST_PREFIX = "273fcf3e."
     const isDevTest = toAddress.startsWith(TEST_PREFIX)
 
-    // Not dev test => relay to production (avoid loop)
+    // not dev test => relay to production (avoid loop)
     if (!isDevTest && !relayed) {
       await logEvent(supabase, { status: 120, note: "relay_to_prod" })
       const { status, text } = await relayToProduction(body)
@@ -171,7 +175,7 @@ export async function POST(req: Request) {
       return new NextResponse(text, { status })
     }
 
-    // Map to user
+    // map to user
     let user_id: string | null = null
     let address_id: string | null = null
 
@@ -200,7 +204,53 @@ export async function POST(req: Request) {
       payload: { mapped: Boolean(user_id), user_id, address_id, toAddress },
     })
 
-    // ✅ IMPORTANT: inbox_emails에는 to_address 컬럼이 없음 → raw로 저장
+    // ✅ inbox_emails에는 to_address 컬럼이 없음 → raw(jsonb)로 남김
     const rawObj = formDataToObject(body)
 
     const { data, error } = await supabase
+      .from("inbox_emails")
+      .insert({
+        user_id,
+        address_id,
+        message_id: messageId || null,
+        from_address: fromAddress || fromRaw,
+        subject,
+        body_html: bodyHtml,
+        body_text: bodyText,
+        raw: rawObj,
+        received_at: receivedAt,
+      })
+      .select("id")
+      .single()
+
+    if (error) {
+      await logEvent(supabase, {
+        status: 500,
+        note: "supabase_insert_error",
+        payload: { code: (error as any).code ?? null, message: error.message },
+      })
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+    }
+
+    await logEvent(supabase, {
+      status: 200,
+      note: "insert_ok",
+      payload: { id: data?.id, mapped: Boolean(user_id), user_id },
+    })
+
+    return NextResponse.json(
+      { ok: true, id: data?.id, mapped: Boolean(user_id), user_id },
+      { status: 200 }
+    )
+  } catch (err: any) {
+    console.error("Webhook error:", err)
+    if (supabase) {
+      await logEvent(supabase, {
+        status: 500,
+        note: "webhook_exception",
+        payload: { message: err?.message ?? String(err) },
+      })
+    }
+    return NextResponse.json({ ok: false, error: "Webhook error" }, { status: 500 })
+  }
+}
