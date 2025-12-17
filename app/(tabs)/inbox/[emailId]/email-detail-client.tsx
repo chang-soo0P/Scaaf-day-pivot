@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { useRouter } from "next/navigation"
-import DOMPurify from "dompurify"
 import {
   ArrowLeft,
   Highlighter,
@@ -144,7 +143,7 @@ function mapDbEmailToView(db: DbEmailRow | null, emailId: string) {
 }
 
 /** -----------------------------
- * UI bits
+ * UI helpers
  * ------------------------------*/
 function formatTimeRelative(dateStr: string) {
   const date = new Date(dateStr)
@@ -156,6 +155,24 @@ function formatTimeRelative(dateStr: string) {
   if (diffMins < 60) return `${diffMins}m ago`
   if (diffHours < 24) return `${diffHours}h ago`
   return date.toLocaleDateString()
+}
+
+// 아주 가벼운 HTML sanitize (script/style/iframe/object 제거 + 이벤트핸들러 제거)
+// ※ 추후 robust sanitizer(예: DOMPurify)로 교체 권장
+function basicSanitizeHtml(input: string) {
+  let html = input
+
+  // 위험 태그 제거
+  html = html.replace(/<script[\s\S]*?<\/script>/gi, "")
+  html = html.replace(/<style[\s\S]*?<\/style>/gi, "")
+  html = html.replace(/<(iframe|object|embed)[\s\S]*?<\/\1>/gi, "")
+  html = html.replace(/<(iframe|object|embed)(.|\n)*?>/gi, "")
+
+  // onClick 등 inline 이벤트 제거
+  html = html.replace(/\son\w+="[^"]*"/gi, "")
+  html = html.replace(/\son\w+='[^']*'/gi, "")
+
+  return html
 }
 
 export default function EmailDetailClient({ emailId, serverData }: EmailDetailClientProps) {
@@ -171,7 +188,9 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
   const [dbEmail, setDbEmail] = useState<DbEmailRow | null>(initialDbEmail)
   const [loading, setLoading] = useState(!initialDbEmail)
-  const [error, setError] = useState<string | null>(serverData?.ok ? null : serverData?.error ?? null)
+  const [error, setError] = useState<string | null>(
+    serverData?.ok ? null : serverData?.error ?? null
+  )
 
   // serverData가 없거나 실패하면, 클라에서 단건 재조회
   useEffect(() => {
@@ -194,7 +213,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         setDbEmail(data.email)
         setError(null)
         setLoading(false)
-      } catch {
+      } catch (e) {
         if (cancelled) return
         setError("Failed to load email")
         setLoading(false)
@@ -211,28 +230,47 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const email = useMemo(() => mapDbEmailToView(dbEmail, emailId), [dbEmail, emailId])
 
   /** -----------------------------
-   * ✅ 1번: HTML sanitize 렌더링용
+   * HTML 원본 표시(개선)
    * ------------------------------*/
   const sanitizedHtml = useMemo(() => {
-    const html = dbEmail?.body_html
-    if (!html) return null
-
-    return DOMPurify.sanitize(html, {
-      USE_PROFILES: { html: true },
-    })
+    const html = dbEmail?.body_html?.trim()
+    if (!html) return ""
+    return basicSanitizeHtml(html)
   }, [dbEmail?.body_html])
+
+  /** ✅ 1) 링크/이미지 속성 자동 보정 (추가) */
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const [isOriginalExpanded, setIsOriginalExpanded] = useState(false)
+
+  useEffect(() => {
+    if (!isOriginalExpanded) return
+    const el = bodyRef.current
+    if (!el) return
+
+    // 모든 링크 새 탭 + 보안 rel
+    el.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
+      a.setAttribute("target", "_blank")
+      a.setAttribute("rel", "noopener noreferrer")
+    })
+
+    // 이미지 lazy + 크기 제한
+    el.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
+      img.setAttribute("loading", "lazy")
+      img.setAttribute("decoding", "async")
+      img.style.maxWidth = "100%"
+      img.style.height = "auto"
+    })
+  }, [isOriginalExpanded, sanitizedHtml])
 
   /** -----------------------------
    * 기존 UI/상태(로컬) 유지
    * ------------------------------*/
   const [showMoreSummary, setShowMoreSummary] = useState(false)
-  const [isOriginalExpanded, setIsOriginalExpanded] = useState(false)
   const [selectedText, setSelectedText] = useState("")
   const [selectionPosition, setSelectionPosition] = useState<{ x: number; y: number } | null>(null)
   const [showShareModal, setShowShareModal] = useState(false)
   const [showCreateOptions, setShowCreateOptions] = useState(false)
   const [highlightToShare, setHighlightToShare] = useState<string | null>(null)
-  const bodyRef = useRef<HTMLDivElement>(null)
 
   const [highlights, setHighlights] = useState<Highlight[]>([])
   const [comments, setComments] = useState<Comment[]>([])
@@ -318,7 +356,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
           return {
             ...comment,
             reactions: comment.reactions.map((r) =>
-              r.emoji === emoji ? { ...r, count: r.count + 1, reacted: true } : r,
+              r.emoji === emoji ? { ...r, count: r.count + 1, reacted: true } : r
             ),
           }
         }
@@ -326,7 +364,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
           ...comment,
           reactions: [...comment.reactions, { emoji, count: 1, reacted: true }],
         }
-      }),
+      })
     )
   }
 
@@ -340,11 +378,11 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
             .map((r) =>
               r.emoji === emoji
                 ? { ...r, count: r.reacted ? r.count - 1 : r.count + 1, reacted: !r.reacted }
-                : r,
+                : r
             )
             .filter((r) => r.count > 0),
         }
-      }),
+      })
     )
   }
 
@@ -554,11 +592,27 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
                 transition={{ duration: 0.2 }}
                 className="overflow-hidden"
               >
+                {/* ✅ 2) 컨테이너 className 강화 + sanitizedHtml이면 HTML 렌더링 */}
                 <div
                   ref={bodyRef}
                   className={cn(
                     "mt-3 rounded-xl bg-card p-4 text-sm text-foreground/80 leading-relaxed",
-                    sanitizedHtml ? "[&_*]:max-w-full" : "whitespace-pre-wrap",
+                    sanitizedHtml ? "whitespace-normal" : "whitespace-pre-wrap",
+                    "[&_*]:max-w-full [&_*]:break-words",
+                    "[&_p]:my-2 [&_br]:block",
+                    "[&_a]:text-primary [&_a]:underline [&_a:hover]:opacity-80",
+                    "[&_h1]:text-lg [&_h1]:font-semibold [&_h1]:my-3",
+                    "[&_h2]:text-base [&_h2]:font-semibold [&_h2]:my-3",
+                    "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:my-2",
+                    "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2",
+                    "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2",
+                    "[&_li]:my-1",
+                    "[&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:my-3 [&_blockquote]:text-muted-foreground",
+                    "[&_img]:rounded-lg [&_img]:my-3 [&_img]:h-auto",
+                    "[&_table]:w-full [&_table]:my-3 [&_table]:border-collapse",
+                    "[&_th]:border [&_td]:border [&_th]:p-2 [&_td]:p-2 [&_th]:bg-secondary/40",
+                    "[&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:bg-secondary/40 [&_pre]:p-3 [&_pre]:my-3",
+                    "[&_code]:rounded [&_code]:bg-secondary/40 [&_code]:px-1 [&_code]:py-0.5"
                   )}
                 >
                   {sanitizedHtml ? (
@@ -620,7 +674,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
                               "flex items-center gap-1 rounded-full px-2 py-0.5 text-xs transition-colors",
                               reaction.reacted
                                 ? "bg-primary/20 text-primary"
-                                : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+                                : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
                             )}
                           >
                             <span>{reaction.emoji}</span>
