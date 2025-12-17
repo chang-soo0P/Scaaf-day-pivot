@@ -1,7 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
-import Image from "next/image"
+import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
@@ -16,26 +15,29 @@ import {
   Share2,
   Sparkles,
   CalendarDays,
-  TrendingUp,
   Target,
   ChevronRight,
+  Mail,
 } from "lucide-react"
 import { motion, AnimatePresence, LayoutGroup } from "framer-motion"
 import { ShineBorder } from "@/components/ui/shine-border"
 import { useDailyMissionStore } from "@/lib/daily-mission-store"
+import { useToast } from "@/hooks/use-toast"
 
-// --- Types (UI용 최소 타입) ---
+// --- Types ---
 type TabType = "byTopics" | "all"
 type LayoutMode = "stack" | "grid" | "list"
 
 type Reaction = { emoji: string; count: number }
 type Comment = { reactions: Reaction[] }
+
 type Email = {
   id: string
   senderName: string
   newsletterTitle: string
   snippet: string
   receivedAt: string
+  receivedAtIso?: string | null
   issueImageEmoji?: string | null
   hasAdSegment?: boolean
   topics: string[]
@@ -60,6 +62,8 @@ type InboxEmailRow = {
   body_text: string | null
   body_html: string | null
   received_at: string | null
+  message_id: string | null
+  address_id: string | null
   raw: any
 }
 
@@ -85,53 +89,129 @@ function makeSnippet(text: string | null) {
 }
 
 const topicEmojiPool = ["🧠", "📈", "🛠️", "📰", "🧪", "🚀", "💡", "🎯", "🌿", "🔮"]
-
 function emojiForKey(key: string) {
   let h = 0
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0
   return topicEmojiPool[h % topicEmojiPool.length]
 }
-
 function toTopicId(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")
 }
 
-// --- fetch hook ---
-function useInboxEmails(limit = 200) {
+// --- fetch hook (5s polling + dedupe + visibility guard + abort overlap) ---
+function useInboxEmails(limit = 200, pollMs = 5000) {
   const [rows, setRows] = useState<InboxEmailRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [lastSeenAt, setLastSeenAt] = useState<string | null>(null)
+  const [newCount, setNewCount] = useState(0)
+
+  // dedupe key for "new arrival" (top row 기준)
+  const pendingToastKeyRef = useRef<string | null>(null)
+
+  const inFlightRef = useRef<AbortController | null>(null)
+  const initialLoadedRef = useRef(false)
+
+  async function fetchOnce(isInitial = false) {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return
+
+    if (inFlightRef.current) inFlightRef.current.abort()
+    const ac = new AbortController()
+    inFlightRef.current = ac
+
+    const res = await fetch(`/api/inbox-emails?limit=${limit}`, {
+      cache: "no-store",
+      signal: ac.signal,
+    }).catch((e) => {
+      if (String((e as any)?.name) === "AbortError") return null
+      throw e
+    })
+
+    if (!res) return
+
+    const json = await res.json()
+
+    if (!res.ok) {
+      console.error("Failed to load inbox emails:", json)
+      if (isInitial) {
+        setRows([])
+        setNewCount(0)
+      }
+      return
+    }
+
+    const nextRows: InboxEmailRow[] = json.emails ?? []
+    setRows(nextRows)
+
+    const top = nextRows[0]
+    const topKey = top ? `${top.id}:${top.received_at ?? ""}` : null
+
+    // 최초 로딩: lastSeenAt만 잡고 newCount/토스트는 0
+    if (!initialLoadedRef.current) {
+      initialLoadedRef.current = true
+      const topAt = top?.received_at ?? null
+      if (topAt) setLastSeenAt(topAt)
+      setNewCount(0)
+      pendingToastKeyRef.current = null
+      return
+    }
+
+    if (!lastSeenAt) {
+      const topAt = top?.received_at ?? null
+      if (topAt) setLastSeenAt(topAt)
+      setNewCount(0)
+      pendingToastKeyRef.current = null
+      return
+    }
+
+    const lastSeenMs = new Date(lastSeenAt).getTime()
+    const cnt = nextRows.filter((r) => {
+      if (!r.received_at) return false
+      return new Date(r.received_at).getTime() > lastSeenMs
+    }).length
+
+    setNewCount(cnt)
+
+    if (cnt > 0 && topKey) {
+      pendingToastKeyRef.current = topKey
+    }
+  }
 
   useEffect(() => {
-    let mounted = true
-    async function run() {
+    let alive = true
+
+    ;(async () => {
       try {
         setLoading(true)
-        const res = await fetch(`/api/inbox-emails?limit=${limit}`, { cache: "no-store" })
-        const json = await res.json()
-        if (!mounted) return
-        if (!res.ok) {
-          console.error("Failed to load inbox emails:", json)
-          setRows([])
-          return
-        }
-        setRows(json.emails ?? [])
-      } catch (e) {
-        console.error(e)
-        if (mounted) setRows([])
+        await fetchOnce(true)
       } finally {
-        if (mounted) setLoading(false)
+        if (alive) setLoading(false)
       }
-    }
-    run()
-    return () => {
-      mounted = false
-    }
-  }, [limit])
+    })()
 
-  return { rows, loading }
+    const t = setInterval(() => {
+      fetchOnce(false).catch(console.error)
+    }, pollMs)
+
+    return () => {
+      alive = false
+      clearInterval(t)
+      if (inFlightRef.current) inFlightRef.current.abort()
+      inFlightRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [limit, pollMs])
+
+  const markSeenNow = () => {
+    const top = rows[0]?.received_at ?? null
+    if (top) setLastSeenAt(top)
+    setNewCount(0)
+    pendingToastKeyRef.current = null
+  }
+
+  return { rows, loading, newCount, lastSeenAt, markSeenNow, pendingToastKeyRef }
 }
 
-// --- Derived data from inbox_emails ---
+// --- derive UI data from inbox_emails ---
 function rowsToUiEmails(rows: InboxEmailRow[]): Email[] {
   return rows.map((r) => {
     const from = r.from_address ?? "Unknown"
@@ -146,6 +226,7 @@ function rowsToUiEmails(rows: InboxEmailRow[]): Email[] {
       newsletterTitle: title,
       snippet,
       receivedAt: formatTime(r.received_at),
+      receivedAtIso: r.received_at,
       issueImageEmoji: emojiForKey(domain),
       hasAdSegment: false,
       topics: [topic],
@@ -198,7 +279,6 @@ const layoutIcons = {
 }
 
 // --- Components ---
-
 function IssueCard({
   email,
   onClick,
@@ -272,7 +352,13 @@ function IssueCard({
   )
 }
 
-function NewsletterCard({ email }: { email: Email }) {
+function NewsletterCard({
+  email,
+  glowNew,
+}: {
+  email: Email
+  glowNew?: boolean
+}) {
   const stats = {
     highlightCount: email.highlights.length,
     commentCount: email.comments.length,
@@ -295,13 +381,17 @@ function NewsletterCard({ email }: { email: Email }) {
 
   return (
     <Link href={`/inbox/${email.id}`}>
-      <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 transition-shadow hover:shadow-md">
+      <div
+        className={cn(
+          "rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 transition-all duration-500 hover:shadow-md",
+          glowNew && "ring-2 ring-primary/35 bg-primary/5 shadow-md"
+        )}
+      >
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1 min-w-0">
             <p className="text-xs font-medium text-muted-foreground">{email.senderName}</p>
-            <h3 className="mt-1 text-sm font-semibold text-foreground line-clamp-2">
-              {email.newsletterTitle}
-            </h3>
+            <h3 className="mt-1 text-sm font-semibold text-foreground line-clamp-2">{email.newsletterTitle}</h3>
+
             <div className="mt-1.5 flex flex-wrap gap-1">
               {email.topics.map((topic) => (
                 <span
@@ -312,16 +402,26 @@ function NewsletterCard({ email }: { email: Email }) {
                 </span>
               ))}
             </div>
+
             <p className="mt-2 text-xs text-muted-foreground line-clamp-2">{email.snippet}</p>
           </div>
+
           {email.issueImageEmoji && (
             <div className="relative h-14 w-14 shrink-0 rounded-xl bg-gradient-to-br from-secondary to-secondary/50 flex items-center justify-center">
               <span className="text-xl">{email.issueImageEmoji}</span>
             </div>
           )}
         </div>
+
         <div className="mt-3 flex items-center gap-3 text-[10px] text-muted-foreground">
           <span>{email.receivedAt}</span>
+
+          {glowNew && (
+            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+              NEW
+            </span>
+          )}
+
           {stats.highlightCount > 0 && (
             <span className="flex items-center gap-0.5">
               <Highlighter className="h-3 w-3" /> {stats.highlightCount}
@@ -334,9 +434,7 @@ function NewsletterCard({ email }: { email: Email }) {
           )}
           {topEmoji && <span>{topEmoji}</span>}
           {email.hasAdSegment && (
-            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">
-              Ad
-            </span>
+            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">Ad</span>
           )}
         </div>
       </div>
@@ -344,44 +442,6 @@ function NewsletterCard({ email }: { email: Email }) {
   )
 }
 
-function TopicNewsletterCard({
-  newsletter,
-}: {
-  newsletter: {
-    id: string
-    name: string
-    subject: string
-    receivedTime: string
-    oneLiner: string
-    topic: string
-    thumbnail: string
-  }
-}) {
-  return (
-    <Link href={`/inbox/${newsletter.id}`}>
-      <div className="flex gap-3 rounded-2xl bg-card p-3 shadow-sm ring-1 ring-border transition-shadow hover:shadow-md">
-        <div className="flex flex-1 min-w-0 flex-col justify-between">
-          <span className="text-xs text-muted-foreground truncate mb-1">{newsletter.name}</span>
-          <h3 className="text-base font-semibold leading-snug line-clamp-2 text-card-foreground">
-            {newsletter.subject}
-          </h3>
-          <div className="flex items-center gap-2 mt-2">
-            <span className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary">
-              {newsletter.topic}
-            </span>
-            <span className="text-xs text-muted-foreground">{newsletter.receivedTime}</span>
-          </div>
-        </div>
-
-        <div className="relative h-20 w-24 flex-shrink-0 overflow-hidden rounded-xl bg-secondary">
-          <Image src={newsletter.thumbnail || "/placeholder.svg"} alt="" fill className="object-cover" />
-        </div>
-      </div>
-    </Link>
-  )
-}
-
-// --- Topic Detail View ---
 function TopicDetailView({
   topic,
   emails,
@@ -476,7 +536,13 @@ function TopicDetailView({
   )
 }
 
-function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (emailId: string) => void }) {
+function StackLayout({
+  emails,
+  onCardClick,
+}: {
+  emails: Email[]
+  onCardClick: (emailId: string) => void
+}) {
   const [currentIndex, setCurrentIndex] = useState(0)
   const [isDragging, setIsDragging] = useState(false)
 
@@ -488,6 +554,7 @@ function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (e
     if (Math.abs(offset) > threshold || Math.abs(velocity) > 500) {
       setCurrentIndex((prev) => (prev + 1) % emails.length)
     }
+
     setTimeout(() => setIsDragging(false), 100)
   }
 
@@ -544,7 +611,13 @@ function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (e
   )
 }
 
-function MasonryGrid({ emails, onCardClick }: { emails: Email[]; onCardClick: (emailId: string) => void }) {
+function MasonryGrid({
+  emails,
+  onCardClick,
+}: {
+  emails: Email[]
+  onCardClick: (emailId: string) => void
+}) {
   const leftColumn: Email[] = []
   const rightColumn: Email[] = []
 
@@ -571,12 +644,6 @@ function MasonryGrid({ emails, onCardClick }: { emails: Email[]; onCardClick: (e
 
 // --- Retention Header Components ---
 function TodaysDigestCard({ onOpenToday }: { onOpenToday: () => void }) {
-  const todayStats = {
-    issuesCount: 0,
-    commentsCount: 0,
-    topTopic: "AI",
-  }
-
   return (
     <div className="rounded-2xl bg-gradient-to-br from-primary/10 via-primary/5 to-background p-4 ring-1 ring-primary/20">
       <div className="flex items-start gap-3 mb-3">
@@ -585,25 +652,8 @@ function TodaysDigestCard({ onOpenToday }: { onOpenToday: () => void }) {
         </div>
         <div className="flex-1">
           <h3 className="text-sm font-semibold text-foreground">Today's Digest</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Your newsletters are arriving. This card will become “daily summary” later.
-          </p>
+          <p className="text-xs text-muted-foreground mt-0.5">This will become a real daily summary later.</p>
         </div>
-      </div>
-
-      <div className="flex flex-wrap gap-2 mb-3">
-        <span className="inline-flex items-center gap-1 rounded-full bg-card px-2.5 py-1 text-xs font-medium text-foreground ring-1 ring-border">
-          <TrendingUp className="h-3 w-3 text-primary" />
-          {todayStats.issuesCount} issues
-        </span>
-        <span className="inline-flex items-center gap-1 rounded-full bg-card px-2.5 py-1 text-xs font-medium text-foreground ring-1 ring-border">
-          <MessageCircle className="h-3 w-3 text-blue-500" />
-          {todayStats.commentsCount} comments
-        </span>
-        <span className="inline-flex items-center gap-1 rounded-full bg-card px-2.5 py-1 text-xs font-medium text-foreground ring-1 ring-border">
-          <Hash className="h-3 w-3 text-amber-500" />
-          {todayStats.topTopic}
-        </span>
       </div>
 
       <button
@@ -665,17 +715,50 @@ function DailyMissionCard() {
 
 // --- Main Page ---
 export default function InboxPage() {
-  const router = useRouter()
+  const { toast } = useToast()
+
   const [activeTab, setActiveTab] = useState<TabType>("byTopics")
   const [selectedTopicId, setSelectedTopicId] = useState<string>("")
   const [layout, setLayout] = useState<LayoutMode>("list")
   const [showTopicDetail, setShowTopicDetail] = useState(false)
   const [selectedTopic, setSelectedTopic] = useState<TopicInfo | null>(null)
 
-  const { rows, loading } = useInboxEmails(200)
+  const { rows, loading, newCount, lastSeenAt, markSeenNow, pendingToastKeyRef } = useInboxEmails(200, 5000)
 
   const allEmails: Email[] = useMemo(() => rowsToUiEmails(rows), [rows])
   const topicsWithStats: TopicInfo[] = useMemo(() => buildTopics(allEmails), [allEmails])
+
+  // All tab: banner only when scrolled down
+  const [isAllScrolledDown, setIsAllScrolledDown] = useState(false)
+  const allTopRef = useRef<HTMLDivElement>(null)
+
+  // NEW only toggle (visible only when NEW exists)
+  const [newOnly, setNewOnly] = useState(false)
+
+  // transient glow (banner click 후 2~3초 유지)
+  const [transientNewIds, setTransientNewIds] = useState<string[]>([])
+  const transientTimerRef = useRef<number | null>(null)
+
+  const NEW_HIGHLIGHT_LIMIT = 3
+
+  // derived "new ids" from lastSeenAt (실시간 NEW 정의)
+  const derivedNewIdsSet = useMemo(() => {
+    if (!lastSeenAt) return new Set<string>()
+    const lastSeenMs = new Date(lastSeenAt).getTime()
+    const ids = allEmails
+      .filter((e) => e.receivedAtIso && new Date(e.receivedAtIso).getTime() > lastSeenMs)
+      .slice(0, NEW_HIGHLIGHT_LIMIT)
+      .map((e) => e.id)
+    return new Set(ids)
+  }, [allEmails, lastSeenAt])
+
+  // effective NEW ids (transient가 있으면 transient 우선)
+  const effectiveNewIdsSet = useMemo(() => {
+    if (transientNewIds.length > 0) return new Set(transientNewIds)
+    return derivedNewIdsSet
+  }, [transientNewIds, derivedNewIdsSet])
+
+  const hasAnyNew = effectiveNewIdsSet.size > 0 || newCount > 0
 
   // init selected topic
   useEffect(() => {
@@ -685,18 +768,81 @@ export default function InboxPage() {
   // selected topic object
   useEffect(() => {
     if (!selectedTopicId) return
-    const t = topicsWithStats.find((x) => x.id === selectedTopicId) ?? null
-    setSelectedTopic(t)
+    setSelectedTopic(topicsWithStats.find((x) => x.id === selectedTopicId) ?? null)
   }, [selectedTopicId, topicsWithStats])
 
   const selectedTopicEmails = useMemo(
     () => (selectedTopicId ? filterEmailsByTopicId(allEmails, selectedTopicId) : []),
-    [allEmails, selectedTopicId]
+    [allEmails, selectedTopicId],
   )
+
+  // Toast dedupe: "새로운 topKey" 기준으로 1회만 + 최소 10초 간격
+  const lastNotifiedKeyRef = useRef<string | null>(null)
+  const lastNotifiedAtRef = useRef<number>(0)
+
+  useEffect(() => {
+    if (loading) return
+    if (newCount <= 0) return
+
+    const key = pendingToastKeyRef.current
+    if (!key) return
+
+    const now = Date.now()
+    if (now - lastNotifiedAtRef.current < 10000) return
+    if (lastNotifiedKeyRef.current === key) return
+
+    toast({
+      title: "New emails arrived",
+      description: `${newCount} new email${newCount > 1 ? "s" : ""} received.`,
+    })
+
+    lastNotifiedKeyRef.current = key
+    lastNotifiedAtRef.current = now
+  }, [newCount, loading, toast, pendingToastKeyRef])
+
+  // All 탭에서만 스크롤 감지해서 배너 노출 제어
+  useEffect(() => {
+    if (activeTab !== "all") {
+      setIsAllScrolledDown(false)
+      return
+    }
+
+    const threshold = 120
+    const onScroll = () => {
+      const y = window.scrollY || 0
+      setIsAllScrolledDown(y > threshold)
+    }
+
+    onScroll()
+    window.addEventListener("scroll", onScroll, { passive: true })
+    return () => window.removeEventListener("scroll", onScroll)
+  }, [activeTab])
+
+  // NEW only가 켜져 있는데 NEW가 사라지면 자동 해제
+  useEffect(() => {
+    if (newOnly && effectiveNewIdsSet.size === 0) setNewOnly(false)
+  }, [newOnly, effectiveNewIdsSet])
+
+  // transient timer cleanup
+  useEffect(() => {
+    return () => {
+      if (transientTimerRef.current) window.clearTimeout(transientTimerRef.current)
+      transientTimerRef.current = null
+    }
+  }, [])
 
   const handleTopicHeadingClick = () => setShowTopicDetail(true)
   const handleIssueCardClick = () => setShowTopicDetail(true)
-  const handleOpenTodayEmails = () => setActiveTab("all")
+
+  const handleOpenTodayEmails = () => {
+    setActiveTab("all")
+  }
+
+  // All tab list (NEW only filter)
+  const allEmailsToRender = useMemo(() => {
+    if (!newOnly) return allEmails
+    return allEmails.filter((e) => effectiveNewIdsSet.has(e.id))
+  }, [allEmails, newOnly, effectiveNewIdsSet])
 
   if (loading) {
     return (
@@ -718,6 +864,7 @@ export default function InboxPage() {
 
   return (
     <div className="flex min-h-full flex-col">
+      {/* Header */}
       <div className="px-4 pt-4 pb-2">
         <h1 className="text-2xl font-bold text-foreground">Inbox</h1>
         <p className="text-sm text-muted-foreground">Your newsletters, organized</p>
@@ -728,32 +875,45 @@ export default function InboxPage() {
         <DailyMissionCard />
       </div>
 
+      {/* Tab Switcher */}
       <div className="sticky top-0 z-10 bg-background pt-2 pb-2">
         <div className="mx-4 flex rounded-xl bg-secondary/50 p-1">
           <button
             onClick={() => setActiveTab("byTopics")}
             className={cn(
               "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "byTopics" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              activeTab === "byTopics"
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
             )}
           >
             By topics
           </button>
+
           <button
             onClick={() => setActiveTab("all")}
             className={cn(
               "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "all" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              activeTab === "all"
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
             )}
           >
             All
+            {newCount > 0 ? (
+              <span className="ml-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                +{newCount}
+              </span>
+            ) : null}
           </button>
         </div>
       </div>
 
+      {/* Content */}
       <div className="flex-1 px-4 pt-4 pb-24">
         {activeTab === "byTopics" ? (
           <>
+            {/* Horizontal topic pills */}
             {topicsWithStats.length > 0 && (
               <div className="flex gap-2 overflow-x-auto pb-4 -mx-4 px-4 scrollbar-hide">
                 {topicsWithStats.map((topic) => (
@@ -762,7 +922,9 @@ export default function InboxPage() {
                     onClick={() => setSelectedTopicId(topic.id)}
                     className={cn(
                       "shrink-0 rounded-full px-4 py-2 text-sm font-medium transition-colors",
-                      selectedTopicId === topic.id ? "bg-foreground text-background" : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+                      selectedTopicId === topic.id
+                        ? "bg-foreground text-background"
+                        : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
                     )}
                   >
                     {topic.name}
@@ -771,17 +933,17 @@ export default function InboxPage() {
               </div>
             )}
 
+            {/* Topic heading and view toggle */}
             <div className="flex items-start justify-between mb-4">
               <button onClick={handleTopicHeadingClick} className="text-left hover:opacity-80 transition-opacity">
                 <h2 className="text-xl font-bold text-foreground flex items-center gap-1">
                   <Hash className="h-5 w-5" />
                   {topicsWithStats.find((t) => t.id === selectedTopicId)?.name || "Loading..."}
                 </h2>
-                <p className="text-sm text-muted-foreground">
-                  {`${selectedTopicEmails.length} issues`}
-                </p>
+                <p className="text-sm text-muted-foreground">{`${selectedTopicEmails.length} issues`}</p>
               </button>
 
+              {/* View mode toggle */}
               <div className="flex items-center gap-1 rounded-lg bg-secondary/50 p-1">
                 {(Object.keys(layoutIcons) as LayoutMode[]).map((mode) => {
                   const Icon = layoutIcons[mode]
@@ -791,7 +953,9 @@ export default function InboxPage() {
                       onClick={() => setLayout(mode)}
                       className={cn(
                         "rounded-md p-2 transition-all",
-                        layout === mode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-secondary",
+                        layout === mode
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:text-foreground hover:bg-secondary",
                       )}
                       aria-label={`Switch to ${mode} layout`}
                     >
@@ -802,6 +966,7 @@ export default function InboxPage() {
               </div>
             </div>
 
+            {/* Issue cards based on layout */}
             {selectedTopicEmails.length === 0 ? (
               <div className="flex items-center justify-center py-8">
                 <p className="text-sm text-muted-foreground">No emails found for this topic</p>
@@ -815,19 +980,85 @@ export default function InboxPage() {
                     ))}
                   </div>
                 )}
+
                 {layout === "grid" && <MasonryGrid emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
+
                 {layout === "stack" && <StackLayout emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
               </>
             )}
           </>
         ) : (
+          /* All tab */
           <div className="flex flex-col gap-4">
-            {allEmails.length === 0 ? (
-              <div className="flex items-center justify-center py-8">
-                <p className="text-sm text-muted-foreground">No emails found</p>
+            {/* scroll anchor */}
+            <div ref={allTopRef} />
+
+            {/* NEW controls row (NEW only toggle) */}
+            {hasAnyNew && (
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs text-muted-foreground">
+                  {effectiveNewIdsSet.size > 0 ? `New: ${effectiveNewIdsSet.size}` : newCount > 0 ? `New: ${newCount}` : "New"}
+                </div>
+
+                <button
+                  onClick={() => setNewOnly((v) => !v)}
+                  className={cn(
+                    "rounded-full px-3 py-1 text-xs font-semibold transition-colors ring-1 ring-border",
+                    newOnly
+                      ? "bg-foreground text-background"
+                      : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+                  )}
+                >
+                  NEW only
+                </button>
+              </div>
+            )}
+
+            {/* NEW banner (only when scrolled down) */}
+            {newCount > 0 && isAllScrolledDown && (
+              <button
+                onClick={() => {
+                  // 1) 현재 NEW 상단 몇 개를 transient로 저장(= 2~3초 유지)
+                  const ids = Array.from(derivedNewIdsSet)
+                  setTransientNewIds(ids)
+
+                  if (transientTimerRef.current) window.clearTimeout(transientTimerRef.current)
+                  transientTimerRef.current = window.setTimeout(() => {
+                    // 2) 자연스럽게 사라지도록 class만 제거 (transition-all로 fade)
+                    setTransientNewIds([])
+                  }, 2600)
+
+                  // 3) 위로 스크롤 + seen 처리(배지/배너 정리)
+                  allTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+                  window.scrollTo({ top: 0, behavior: "smooth" })
+                  markSeenNow()
+                }}
+                className="sticky top-2 z-20 flex items-center justify-center gap-2 rounded-xl border border-border bg-card/90 px-4 py-2 text-sm font-semibold text-foreground shadow-sm backdrop-blur hover:bg-card transition-colors"
+              >
+                <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10">
+                  <Mail className="h-4 w-4 text-primary" />
+                </span>
+                새 메일 {newCount}개 도착 — 위로 이동
+              </button>
+            )}
+
+            {allEmailsToRender.length === 0 ? (
+              <div className="flex items-center justify-center py-10">
+                <div className="rounded-2xl border border-dashed p-8 text-center text-muted-foreground">
+                  <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-secondary">
+                    <Mail className="h-5 w-5" />
+                  </div>
+                  {newOnly ? "No NEW emails to show." : "No emails found yet. Send a newsletter to your @mg.scaaf.day address."}
+                </div>
               </div>
             ) : (
-              allEmails.map((email) => <NewsletterCard key={email.id} email={email} />)
+              allEmailsToRender.map((email) => (
+                <NewsletterCard
+                  key={email.id}
+                  email={email}
+                  glowNew={effectiveNewIdsSet.has(email.id)}
+                />
+              ))
             )}
           </div>
         )}
