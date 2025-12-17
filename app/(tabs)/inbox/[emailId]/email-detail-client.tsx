@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { useRouter } from "next/navigation"
+import DOMPurify from "dompurify"
 import {
   ArrowLeft,
   Highlighter,
@@ -14,8 +15,6 @@ import {
   Send,
   Trash2,
   Sparkles,
-  MessageSquare,
-  Check,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { motion, AnimatePresence } from "framer-motion"
@@ -135,17 +134,17 @@ function mapDbEmailToView(db: DbEmailRow | null, emailId: string) {
     id: db.id,
     senderName,
     subject,
-    topics: [] as string[], // (추후 topics 테이블/추론 붙이면 여기 채우면 됨)
+    topics: [] as string[],
     date,
     time,
     summary: buildSummaryFromBody(bodyText),
-    bullets: [] as string[], // (추후 AI 요약 결과 저장하면 채우면 됨)
+    bullets: [] as string[],
     body: bodyText || "No content available.",
   }
 }
 
 /** -----------------------------
- * UI bits (기존 유지)
+ * UI bits
  * ------------------------------*/
 function formatTimeRelative(dateStr: string) {
   const date = new Date(dateStr)
@@ -172,9 +171,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
   const [dbEmail, setDbEmail] = useState<DbEmailRow | null>(initialDbEmail)
   const [loading, setLoading] = useState(!initialDbEmail)
-  const [error, setError] = useState<string | null>(
-    serverData?.ok ? null : serverData?.error ?? null
-  )
+  const [error, setError] = useState<string | null>(serverData?.ok ? null : serverData?.error ?? null)
 
   // serverData가 없거나 실패하면, 클라에서 단건 재조회
   useEffect(() => {
@@ -197,7 +194,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         setDbEmail(data.email)
         setError(null)
         setLoading(false)
-      } catch (e) {
+      } catch {
         if (cancelled) return
         setError("Failed to load email")
         setLoading(false)
@@ -212,6 +209,18 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
   // 화면용 email object
   const email = useMemo(() => mapDbEmailToView(dbEmail, emailId), [dbEmail, emailId])
+
+  /** -----------------------------
+   * ✅ 1번: HTML sanitize 렌더링용
+   * ------------------------------*/
+  const sanitizedHtml = useMemo(() => {
+    const html = dbEmail?.body_html
+    if (!html) return null
+
+    return DOMPurify.sanitize(html, {
+      USE_PROFILES: { html: true },
+    })
+  }, [dbEmail?.body_html])
 
   /** -----------------------------
    * 기존 UI/상태(로컬) 유지
@@ -309,7 +318,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
           return {
             ...comment,
             reactions: comment.reactions.map((r) =>
-              r.emoji === emoji ? { ...r, count: r.count + 1, reacted: true } : r
+              r.emoji === emoji ? { ...r, count: r.count + 1, reacted: true } : r,
             ),
           }
         }
@@ -317,7 +326,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
           ...comment,
           reactions: [...comment.reactions, { emoji, count: 1, reacted: true }],
         }
-      })
+      }),
     )
   }
 
@@ -331,11 +340,11 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
             .map((r) =>
               r.emoji === emoji
                 ? { ...r, count: r.reacted ? r.count - 1 : r.count + 1, reacted: !r.reacted }
-                : r
+                : r,
             )
             .filter((r) => r.count > 0),
         }
-      })
+      }),
     )
   }
 
@@ -547,9 +556,16 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
               >
                 <div
                   ref={bodyRef}
-                  className="mt-3 rounded-xl bg-card p-4 text-sm text-foreground/80 leading-relaxed whitespace-pre-wrap"
+                  className={cn(
+                    "mt-3 rounded-xl bg-card p-4 text-sm text-foreground/80 leading-relaxed",
+                    sanitizedHtml ? "[&_*]:max-w-full" : "whitespace-pre-wrap",
+                  )}
                 >
-                  {email.body}
+                  {sanitizedHtml ? (
+                    <div className="space-y-3" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
+                  ) : (
+                    email.body
+                  )}
                 </div>
               </motion.div>
             )}
@@ -602,7 +618,9 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
                             onClick={() => handleToggleReaction(comment.id, reaction.emoji)}
                             className={cn(
                               "flex items-center gap-1 rounded-full px-2 py-0.5 text-xs transition-colors",
-                              reaction.reacted ? "bg-primary/20 text-primary" : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                              reaction.reacted
+                                ? "bg-primary/20 text-primary"
+                                : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
                             )}
                           >
                             <span>{reaction.emoji}</span>
