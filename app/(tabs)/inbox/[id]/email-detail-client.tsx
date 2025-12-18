@@ -293,9 +293,10 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
   /** ✅ highlights load */
   useEffect(() => {
+    if (!emailId || emailId === "undefined" || emailId === "null") return
     let cancelled = false
+
     async function load() {
-      if (!emailId) return
       try {
         setHighlightsLoading(true)
         const res = await fetch(`/api/inbox-emails/${emailId}/highlights`, {
@@ -319,17 +320,19 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         setHighlightsLoading(false)
       }
     }
+
     load()
     return () => {
       cancelled = true
     }
-  }, [emailId])
+  }, [emailId])  
 
   /** ✅ comments load */
   useEffect(() => {
+    if (!emailId || emailId === "undefined" || emailId === "null") return
     let cancelled = false
+
     async function load() {
-      if (!emailId) return
       try {
         setCommentsLoading(true)
         const res = await fetch(`/api/inbox-emails/${emailId}/comments`, {
@@ -353,11 +356,12 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         setCommentsLoading(false)
       }
     }
+
     load()
     return () => {
       cancelled = true
     }
-  }, [emailId])
+  }, [emailId])  
 
   /** text selection */
   const handleTextSelection = useCallback(() => {
