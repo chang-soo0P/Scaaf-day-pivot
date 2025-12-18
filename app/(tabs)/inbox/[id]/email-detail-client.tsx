@@ -186,13 +186,20 @@ function basicSanitizeHtml(input: string) {
   return html
 }
 
+function isValidEmailIdValue(v: string) {
+  return Boolean(v && v !== "undefined" && v !== "null")
+}
+
+/** tiny helper */
+function forceToggle(setter: (v: boolean | ((prev: boolean) => boolean)) => void) {
+  setter((prev: boolean) => !prev)
+}
+
 export default function EmailDetailClient({ emailId, serverData }: EmailDetailClientProps) {
   const router = useRouter()
 
-  // Guard: emailId가 없으면 렌더링하지 않음
-  if (!emailId || emailId === "undefined" || emailId === "null") {
-    return null
-  }
+  // ✅ early return 금지 → 대신 “유효성 플래그”로만 처리
+  const isValidEmailId = isValidEmailIdValue(emailId)
 
   /** -----------------------------
    * DB email state
@@ -204,9 +211,20 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
   const [dbEmail, setDbEmail] = useState<DbEmailRow | null>(initialDbEmail)
   const [loading, setLoading] = useState(!initialDbEmail)
-  const [error, setError] = useState<string | null>(serverData?.ok ? null : serverData?.error ?? null)
+  const [error, setError] = useState<string | null>(
+    serverData?.ok ? null : serverData?.error ?? null
+  )
 
+  // 단건 이메일 로드
   useEffect(() => {
+    // invalid면 상태만 정리하고 끝 (hook은 항상 호출됨)
+    if (!isValidEmailId) {
+      setDbEmail(null)
+      setLoading(false)
+      setError("Invalid email id")
+      return
+    }
+
     if (dbEmail) return
     let cancelled = false
 
@@ -240,7 +258,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     return () => {
       cancelled = true
     }
-  }, [emailId, dbEmail])
+  }, [emailId, isValidEmailId, dbEmail])
 
   const email = useMemo(() => mapDbEmailToView(dbEmail, emailId), [dbEmail, emailId])
 
@@ -283,7 +301,9 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const [showShareModal, setShowShareModal] = useState(false)
   const [showCreateOptions, setShowCreateOptions] = useState(false)
 
-  const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(null)
+  const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(
+    null
+  )
 
   const [highlights, setHighlights] = useState<Highlight[]>([])
   const [comments, setComments] = useState<Comment[]>([])
@@ -291,11 +311,15 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const [highlightsLoading, setHighlightsLoading] = useState(false)
   const [commentsLoading, setCommentsLoading] = useState(false)
 
-  /** ✅ highlights load */
+  /** highlights load */
   useEffect(() => {
-    if (!emailId || emailId === "undefined" || emailId === "null") return
-    let cancelled = false
+    if (!isValidEmailId) {
+      setHighlights([])
+      setHighlightsLoading(false)
+      return
+    }
 
+    let cancelled = false
     async function load() {
       try {
         setHighlightsLoading(true)
@@ -320,18 +344,21 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         setHighlightsLoading(false)
       }
     }
-
     load()
     return () => {
       cancelled = true
     }
-  }, [emailId])  
+  }, [emailId, isValidEmailId])
 
-  /** ✅ comments load */
+  /** comments load */
   useEffect(() => {
-    if (!emailId || emailId === "undefined" || emailId === "null") return
-    let cancelled = false
+    if (!isValidEmailId) {
+      setComments([])
+      setCommentsLoading(false)
+      return
+    }
 
+    let cancelled = false
     async function load() {
       try {
         setCommentsLoading(true)
@@ -356,12 +383,11 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         setCommentsLoading(false)
       }
     }
-
     load()
     return () => {
       cancelled = true
     }
-  }, [emailId])  
+  }, [emailId, isValidEmailId])
 
   /** text selection */
   const handleTextSelection = useCallback(() => {
@@ -391,6 +417,8 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
   /** highlight CRUD */
   const createHighlight = async (quote: string) => {
+    if (!isValidEmailId) return null
+
     const optimistic: Highlight = {
       id: `temp-h-${Date.now()}`,
       quote,
@@ -421,7 +449,10 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     const prev = highlights
     setHighlights((cur) => cur.filter((h) => h.id !== highlightId))
     try {
-      const res = await fetch(`/api/email-highlights/${highlightId}`, { method: "DELETE" })
+      const res = await fetch(`/api/email-highlights/${highlightId}`, {
+        method: "DELETE",
+        credentials: "include",
+      })
       const data = await safeReadJson<ApiOkResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to delete highlight")
       return true
@@ -440,6 +471,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ isShared: true }),
+        credentials: "include",
       })
       const data = await safeReadJson<ApiHighlightPatchResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to share highlight")
@@ -476,6 +508,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
   /** comments CRUD */
   const handleAddComment = async () => {
+    if (!isValidEmailId) return
     if (!newComment.trim()) return
 
     const text = newComment.trim()
@@ -511,7 +544,10 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     const prev = comments
     setComments((cur) => cur.filter((c) => c.id !== commentId))
     try {
-      const res = await fetch(`/api/email-comments/${commentId}`, { method: "DELETE" })
+      const res = await fetch(`/api/email-comments/${commentId}`, {
+        method: "DELETE",
+        credentials: "include",
+      })
       const data = await safeReadJson<ApiOkResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to delete comment")
     } catch {
@@ -546,11 +582,14 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ emoji }),
+        credentials: "include",
       })
       const data = await safeReadJson<ApiReactionToggleResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to toggle reaction")
 
-      setComments((cur) => cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c)))
+      setComments((cur) =>
+        cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c))
+      )
     } catch {
       setComments(prev)
     }
@@ -559,70 +598,21 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const availableEmojis = ["👍", "❤️", "🔥", "💡", "😂", "🤔", "👀", "🎉"]
 
   /** -----------------------------
-   * Loading/Error UI
+   * Content (no early returns)
    * ------------------------------*/
-  if (loading) {
-    return (
-      <div className="flex min-h-full flex-col bg-background">
-        <div className="sticky top-0 z-20 flex items-center justify-between border-b border-border/50 bg-background/95 px-4 py-3 backdrop-blur-sm">
-          <button onClick={() => router.back()} className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-            <ArrowLeft className="h-4 w-4" />
-            Back
-          </button>
-        </div>
-        <div className="px-4 py-10 text-sm text-muted-foreground">Loading…</div>
+  const content = !isValidEmailId ? (
+    <div className="px-4 py-10 text-sm text-muted-foreground">Invalid email id.</div>
+  ) : loading ? (
+    <div className="px-4 py-10 text-sm text-muted-foreground">Loading…</div>
+  ) : error ? (
+    <div className="px-4 py-6">
+      <div className="rounded-2xl border border-border bg-card p-4">
+        <div className="text-sm font-semibold text-foreground">Failed to load</div>
+        <div className="mt-1 text-sm text-muted-foreground">{error}</div>
       </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="flex min-h-full flex-col bg-background">
-        <div className="sticky top-0 z-20 flex items-center justify-between border-b border-border/50 bg-background/95 px-4 py-3 backdrop-blur-sm">
-          <button onClick={() => router.back()} className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-            <ArrowLeft className="h-4 w-4" />
-            Back
-          </button>
-        </div>
-
-        <div className="px-4 py-6">
-          <div className="rounded-2xl border border-border bg-card p-4">
-            <div className="text-sm font-semibold text-foreground">Failed to load</div>
-            <div className="mt-1 text-sm text-muted-foreground">{error}</div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  /** -----------------------------
-   * Main UI
-   * ------------------------------*/
-  return (
-    <div className="flex min-h-full flex-col bg-background">
-      {/* Header */}
-      <div className="sticky top-0 z-20 flex items-center justify-between border-b border-border/50 bg-background/95 px-4 py-3 backdrop-blur-sm">
-        <button onClick={() => router.back()} className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-          <ArrowLeft className="h-4 w-4" />
-          Back
-        </button>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => forceToggle(setShowCreateOptions)}
-            className="rounded-full bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80"
-          >
-            <Plus className="h-4 w-4" />
-          </button>
-          <button
-            onClick={() => setShowShareModal(true)}
-            className="rounded-full bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80"
-            aria-label="Share"
-          >
-            <Share2 className="h-4 w-4" />
-          </button>
-        </div>
-      </div>
-
+    </div>
+  ) : (
+    <>
       {/* Content */}
       <div className="flex-1 px-4 pb-32">
         {/* Email Header */}
@@ -942,13 +932,11 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
                   <button
                     key={circle}
                     onClick={async () => {
-                      // 헤더 Share 버튼으로 들어온 경우: 그냥 닫기
                       if (!highlightToShare?.quote) {
                         setShowShareModal(false)
                         return
                       }
 
-                      // 선택 텍스트 공유(아직 highlight id 없음) -> 먼저 생성 -> shared 처리
                       if (!highlightToShare.id) {
                         const created = await createHighlight(highlightToShare.quote)
                         if (created) await markHighlightShared(created.id)
@@ -1027,11 +1015,43 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
           </motion.div>
         )}
       </AnimatePresence>
+    </>
+  )
+
+  /** -----------------------------
+   * Root UI (header is always present)
+   * ------------------------------*/
+  return (
+    <div className="flex min-h-full flex-col bg-background">
+      {/* Header */}
+      <div className="sticky top-0 z-20 flex items-center justify-between border-b border-border/50 bg-background/95 px-4 py-3 backdrop-blur-sm">
+        <button
+          onClick={() => router.back()}
+          className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Back
+        </button>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => forceToggle(setShowCreateOptions)}
+            className="rounded-full bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80"
+            aria-label="Create"
+          >
+            <Plus className="h-4 w-4" />
+          </button>
+          <button
+            onClick={() => setShowShareModal(true)}
+            className="rounded-full bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80"
+            aria-label="Share"
+          >
+            <Share2 className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
+      {content}
     </div>
   )
-}
-
-/** tiny helper */
-function forceToggle(setter: (v: boolean | ((prev: boolean) => boolean)) => void) {
-  setter((prev: boolean) => !prev)
 }
