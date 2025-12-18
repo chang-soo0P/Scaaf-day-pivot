@@ -1,3 +1,4 @@
+// components/message-bubble.tsx
 import Link from "next/link"
 
 interface TextMessageProps {
@@ -16,7 +17,9 @@ interface HighlightMessageProps {
   newsletterName: string
   quote: string
   topic: string
-  emailId: number
+
+  /** ✅ 반드시 inbox_emails.id (uuid/string) */
+  emailId: string
 }
 
 type MessageProps = TextMessageProps | HighlightMessageProps
@@ -48,10 +51,13 @@ export function MessageBubble(props: MessageProps) {
           <div className="mt-1 rounded-2xl rounded-tl-md bg-highlight p-4 ring-1 ring-highlight-border">
             <p className="text-xs font-medium text-highlight-foreground">Highlight from {props.newsletterName}</p>
             <p className="mt-2 text-sm italic text-foreground/80">"{props.quote}"</p>
+
             <div className="mt-3 flex items-center justify-between">
               <span className="rounded-full bg-secondary px-2.5 py-1 text-xs font-medium text-secondary-foreground">
                 {props.topic}
               </span>
+
+              {/* ✅ DB uuid로 이동 */}
               <Link
                 href={`/inbox/${props.emailId}`}
                 className="text-xs font-medium text-muted-foreground hover:text-foreground"
