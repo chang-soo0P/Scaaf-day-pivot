@@ -2,6 +2,7 @@
 
 import { ChevronLeft, MessageSquare, Highlighter } from "lucide-react"
 import Link from "next/link"
+import { emailDetailHref } from "@/lib/email-href"
 import { useParams } from "next/navigation"
 import { getEmailById, getEmailStats } from "@/lib/email-mock-data"
 
@@ -174,8 +175,9 @@ function SharedNewsletterCard({
     sharedAt: string
   }
 }) {
+  const href = emailDetailHref(newsletter.emailId)
   return (
-    <Link href={`/inbox/${newsletter.emailId}`}>
+    <Link href={href ?? "#"}>
       <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border transition-shadow hover:shadow-md">
         {/* Header: sender icon + sender name + time */}
         <div className="flex items-center gap-2 mb-2">

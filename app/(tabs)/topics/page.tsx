@@ -5,6 +5,7 @@ import type React from "react"
 import { useState } from "react"
 import Image from "next/image"
 import { useRouter } from "next/navigation"
+import { emailDetailHref } from "@/lib/email-href"
 import { cn } from "@/lib/utils"
 import { MessageCircle, Megaphone, Grid3X3, LayoutList } from "lucide-react"
 import { getAllEmails, adItems, type Comment, type Reaction } from "@/lib/email-mock-data"
@@ -216,7 +217,9 @@ export default function TopicsPage() {
   const feedItems = useFeedItems()
 
   const handleOpenEmail = (emailId: string) => {
-    router.push(`/inbox/${emailId}`)
+    const href = emailDetailHref(emailId)
+    if (!href) return
+    router.push(href)
   }
 
   return (

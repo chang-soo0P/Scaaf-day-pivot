@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
+import { emailDetailHref } from "@/lib/email-href"
 import {
   ChevronLeft,
   Hash,
@@ -379,8 +380,10 @@ function NewsletterCard({
     }
   })
 
-  return (
-    <Link href={`/inbox/${email.id}`}>
+  const href = emailDetailHref(email.id)
+
+  return href ? (
+    <Link href={href}>
       <div
         className={cn(
           "rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 transition-all duration-500 hover:shadow-md",
@@ -439,6 +442,32 @@ function NewsletterCard({
         </div>
       </div>
     </Link>
+  ) : (
+    <div
+      className={cn(
+        "rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 transition-all duration-500 hover:shadow-md opacity-60 cursor-not-allowed",
+        glowNew && "ring-2 ring-primary/35 bg-primary/5 shadow-md",
+      )}
+    >
+      {/* 동일 내용, 단 클릭 불가 상태 */}
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-medium text-muted-foreground">{email.senderName}</p>
+          <h3 className="mt-1 text-sm font-semibold text-foreground line-clamp-2">{email.newsletterTitle}</h3>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {email.topics.map((topic) => (
+              <span
+                key={topic}
+                className="inline-block rounded-full bg-secondary px-2 py-0.5 text-[10px] font-medium text-secondary-foreground"
+              >
+                {topic}
+              </span>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-muted-foreground line-clamp-2">{email.snippet}</p>
+        </div>
+      </div>
+    </div>
   )
 }
 

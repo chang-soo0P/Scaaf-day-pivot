@@ -1,4 +1,5 @@
 import Link from "next/link"
+import { emailDetailHref } from "@/lib/email-href"
 import Image from "next/image"
 import { ArrowLeft, Share2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -238,8 +239,9 @@ function NewsletterCard({
     thumbnail: string
   }
 }) {
+  const href = emailDetailHref(newsletter.id)
   return (
-    <Link href={`/inbox/${newsletter.id}`}>
+    <Link href={href ?? "#"}>
       <div className="flex gap-3 rounded-2xl bg-card p-3 shadow-sm ring-1 ring-border transition-shadow hover:shadow-md">
         {/* Left side - text content */}
         <div className="flex flex-1 min-w-0 flex-col justify-between">
