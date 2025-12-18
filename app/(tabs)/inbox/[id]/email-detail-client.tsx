@@ -14,6 +14,7 @@ import {
   Send,
   Trash2,
   Sparkles,
+  Check,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { motion, AnimatePresence } from "framer-motion"
@@ -37,9 +38,7 @@ type DbEmailRow = {
   received_at: string | null
 }
 
-type ApiSingleEmailResponse =
-  | { ok: true; email: DbEmailRow }
-  | { ok: false; error?: string }
+type ApiSingleEmailResponse = { ok: true; email: DbEmailRow } | { ok: false; error?: string }
 
 type Highlight = {
   id: string
@@ -58,25 +57,12 @@ type Comment = {
   reactions: { emoji: string; count: number; reacted: boolean }[]
 }
 
-type ApiHighlightsListResponse =
-  | { ok: true; highlights: Highlight[] }
-  | { ok: false; error?: string }
+type ApiHighlightsListResponse = { ok: true; highlights: Highlight[] } | { ok: false; error?: string }
+type ApiHighlightCreateResponse = { ok: true; highlight: Highlight } | { ok: false; error?: string }
+type ApiHighlightPatchResponse = { ok: true; highlight: Highlight } | { ok: false; error?: string }
 
-type ApiHighlightCreateResponse =
-  | { ok: true; highlight: Highlight }
-  | { ok: false; error?: string }
-
-type ApiHighlightPatchResponse =
-  | { ok: true; highlight: Highlight }
-  | { ok: false; error?: string }
-
-type ApiCommentsListResponse =
-  | { ok: true; comments: Comment[] }
-  | { ok: false; error?: string }
-
-type ApiCommentCreateResponse =
-  | { ok: true; comment: Comment }
-  | { ok: false; error?: string }
+type ApiCommentsListResponse = { ok: true; comments: Comment[] } | { ok: false; error?: string }
+type ApiCommentCreateResponse = { ok: true; comment: Comment } | { ok: false; error?: string }
 
 type ApiOkResponse = { ok: true } | { ok: false; error?: string }
 
@@ -97,7 +83,6 @@ async function safeReadJson<T>(res: Response): Promise<T> {
   try {
     return JSON.parse(text) as T
   } catch {
-    // JSON이 아니면 에러 메시지로 감싸서 리턴
     return { ok: false, error: text || `HTTP ${res.status}` } as unknown as T
   }
 }
@@ -125,12 +110,11 @@ function stripHtml(html: string) {
 }
 
 function formatHeaderDateTime(iso: string | null) {
-  if (!iso) return { date: "", time: "", receivedAtText: "" }
+  if (!iso) return { date: "", time: "" }
   const d = new Date(iso)
-  const receivedAtText = d.toLocaleString()
   const date = d.toLocaleDateString()
   const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-  return { date, time, receivedAtText }
+  return { date, time }
 }
 
 function buildSummaryFromBody(body: string) {
@@ -178,9 +162,6 @@ function mapDbEmailToView(db: DbEmailRow | null, emailId: string) {
   }
 }
 
-/** -----------------------------
- * UI helpers
- * ------------------------------*/
 function formatTimeRelative(dateStr: string) {
   const date = new Date(dateStr)
   const now = new Date()
@@ -193,18 +174,15 @@ function formatTimeRelative(dateStr: string) {
   return date.toLocaleDateString()
 }
 
-// 아주 가벼운 HTML sanitize (script/style/iframe/object 제거 + 이벤트핸들러 제거)
+// 아주 가벼운 HTML sanitize
 function basicSanitizeHtml(input: string) {
   let html = input
-
   html = html.replace(/<script[\s\S]*?<\/script>/gi, "")
   html = html.replace(/<style[\s\S]*?<\/style>/gi, "")
   html = html.replace(/<(iframe|object|embed)[\s\S]*?<\/\1>/gi, "")
   html = html.replace(/<(iframe|object|embed)(.|\n)*?>/gi, "")
-
   html = html.replace(/\son\w+="[^"]*"/gi, "")
   html = html.replace(/\son\w+='[^']*'/gi, "")
-
   return html
 }
 
@@ -212,7 +190,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const router = useRouter()
 
   /** -----------------------------
-   * DB email state (serverData 우선)
+   * DB email state
    * ------------------------------*/
   const initialDbEmail: DbEmailRow | null = useMemo(() => {
     if (serverData?.ok && serverData?.email) return serverData.email as DbEmailRow
@@ -223,7 +201,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const [loading, setLoading] = useState(!initialDbEmail)
   const [error, setError] = useState<string | null>(serverData?.ok ? null : serverData?.error ?? null)
 
-  // serverData가 없거나 실패하면, 클라에서 단건 재조회
   useEffect(() => {
     if (dbEmail) return
     let cancelled = false
@@ -260,7 +237,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const email = useMemo(() => mapDbEmailToView(dbEmail, emailId), [dbEmail, emailId])
 
   /** -----------------------------
-   * HTML 원본 표시(개선)
+   * HTML original rendering
    * ------------------------------*/
   const sanitizedHtml = useMemo(() => {
     const html = dbEmail?.body_html?.trim()
@@ -268,7 +245,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     return basicSanitizeHtml(html)
   }, [dbEmail?.body_html])
 
-  /** ✅ 1) 링크/이미지 속성 자동 보정 */
   const bodyRef = useRef<HTMLDivElement>(null)
   const [isOriginalExpanded, setIsOriginalExpanded] = useState(false)
 
@@ -291,7 +267,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   }, [isOriginalExpanded, sanitizedHtml])
 
   /** -----------------------------
-   * 기존 UI/상태(로컬)
+   * Local UI state
    * ------------------------------*/
   const [showMoreSummary, setShowMoreSummary] = useState(false)
   const [selectedText, setSelectedText] = useState("")
@@ -299,17 +275,15 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const [showShareModal, setShowShareModal] = useState(false)
   const [showCreateOptions, setShowCreateOptions] = useState(false)
 
-  // 공유 모달에 넘길 데이터: highlightId가 있으면 PATCH로 isShared 처리 가능
   const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(null)
 
   const [highlights, setHighlights] = useState<Highlight[]>([])
   const [comments, setComments] = useState<Comment[]>([])
   const [newComment, setNewComment] = useState("")
-
   const [highlightsLoading, setHighlightsLoading] = useState(false)
   const [commentsLoading, setCommentsLoading] = useState(false)
 
-  /** ✅ (1) mount 시 highlights 로드 */
+  /** ✅ highlights load */
   useEffect(() => {
     let cancelled = false
     async function load() {
@@ -320,7 +294,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         if (cancelled) return
 
         if (!data.ok) {
-          // 로드 실패해도 UI는 살려두기
           setHighlights([])
           setHighlightsLoading(false)
           return
@@ -340,7 +313,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     }
   }, [emailId])
 
-  /** ✅ (1) mount 시 comments 로드 */
+  /** ✅ comments load */
   useEffect(() => {
     let cancelled = false
     async function load() {
@@ -370,7 +343,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     }
   }, [emailId])
 
-  /** 텍스트 선택 감지 */
+  /** text selection */
   const handleTextSelection = useCallback(() => {
     const selection = window.getSelection()
     if (selection && selection.toString().trim().length > 0) {
@@ -396,7 +369,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     }
   }, [handleTextSelection])
 
-  /** ✅ (2) 하이라이트 생성: DB 저장 + state 반영 */
+  /** highlight CRUD */
   const createHighlight = async (quote: string) => {
     const optimistic: Highlight = {
       id: `temp-h-${Date.now()}`,
@@ -413,20 +386,16 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         body: JSON.stringify({ quote }),
       })
       const data = await safeReadJson<ApiHighlightCreateResponse>(res)
-
       if (!data.ok) throw new Error(data.error ?? "Failed to create highlight")
 
-      // temp -> real replace
       setHighlights((prev) => prev.map((h) => (h.id === optimistic.id ? data.highlight : h)))
       return data.highlight
     } catch {
-      // rollback
       setHighlights((prev) => prev.filter((h) => h.id !== optimistic.id))
       return null
     }
   }
 
-  /** ✅ (2) 하이라이트 삭제 */
   const deleteHighlight = async (highlightId: string) => {
     const prev = highlights
     setHighlights((cur) => cur.filter((h) => h.id !== highlightId))
@@ -441,7 +410,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     }
   }
 
-  /** ✅ (2) 하이라이트 공유 처리(isShared true) */
   const markHighlightShared = async (highlightId: string) => {
     const prev = highlights
     setHighlights((cur) => cur.map((h) => (h.id === highlightId ? { ...h, isShared: true } : h)))
@@ -473,7 +441,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
   const handleShare = () => {
     if (!selectedText) return
-    // 아직 highlight가 없을 수 있으니, quote만 들고 모달 띄움
     setHighlightToShare({ quote: selectedText })
     setShowShareModal(true)
     setSelectedText("")
@@ -486,7 +453,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     setShowShareModal(true)
   }
 
-  /** ✅ (2) 댓글 생성: DB 저장 + state 반영 */
+  /** comments CRUD */
   const handleAddComment = async () => {
     if (!newComment.trim()) return
 
@@ -507,23 +474,17 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
       const res = await fetch(`/api/inbox-emails/${emailId}/comments`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          text,
-          authorName: "You",
-          authorAvatarColor: "#3b82f6",
-        }),
+        body: JSON.stringify({ text, authorName: "You", authorAvatarColor: "#3b82f6" }),
       })
       const data = await safeReadJson<ApiCommentCreateResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to create comment")
 
       setComments((prev) => prev.map((c) => (c.id === optimistic.id ? data.comment : c)))
     } catch {
-      // rollback
       setComments((prev) => prev.filter((c) => c.id !== optimistic.id))
     }
   }
 
-  /** ✅ (2) 댓글 삭제: DB 삭제 + state 반영 */
   const handleDeleteComment = async (commentId: string) => {
     const prev = comments
     setComments((cur) => cur.filter((c) => c.id !== commentId))
@@ -536,10 +497,10 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     }
   }
 
-  /** ✅ (2) 리액션 토글: 서버가 source of truth */
   const toggleReaction = async (commentId: string, emoji: string) => {
-    // optimistic: 간단하게 로컬에서 토글만
     const prev = comments
+
+    // optimistic
     setComments((cur) =>
       cur.map((c) => {
         if (c.id !== commentId) return c
@@ -549,7 +510,9 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         }
         const next = c.reactions
           .map((r) =>
-            r.emoji === emoji ? { ...r, count: r.reacted ? r.count - 1 : r.count + 1, reacted: !r.reacted } : r
+            r.emoji === emoji
+              ? { ...r, count: r.reacted ? r.count - 1 : r.count + 1, reacted: !r.reacted }
+              : r
           )
           .filter((r) => r.count > 0)
         return { ...c, reactions: next }
@@ -565,10 +528,8 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
       const data = await safeReadJson<ApiReactionToggleResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to toggle reaction")
 
-      // 서버 결과로 reactions 동기화
       setComments((cur) => cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c)))
     } catch {
-      // rollback
       setComments(prev)
     }
   }
@@ -625,7 +586,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         </button>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setShowCreateOptions(!showCreateOptions)}
+            onClick={() => forceToggle(setShowCreateOptions)}
             className="rounded-full bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80"
           >
             <Plus className="h-4 w-4" />
@@ -633,6 +594,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
           <button
             onClick={() => setShowShareModal(true)}
             className="rounded-full bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80"
+            aria-label="Share"
           >
             <Share2 className="h-4 w-4" />
           </button>
@@ -660,16 +622,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
           </div>
 
           <h1 className="mt-2 text-xl font-bold text-foreground leading-tight">{email.subject}</h1>
-
-          {email.topics.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {email.topics.map((topic) => (
-                <span key={topic} className="rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground">
-                  {topic}
-                </span>
-              ))}
-            </div>
-          )}
         </div>
 
         {/* AI Summary */}
@@ -724,9 +676,24 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
                     <span className="text-xs text-muted-foreground">{formatTimeRelative(h.createdAt)}</span>
 
                     <div className="flex items-center gap-3">
-                      <button onClick={() => handleShareHighlight(h)} className="text-xs text-primary hover:underline">
-                        Share
+                      <button
+                        onClick={() => handleShareHighlight(h)}
+                        className={cn(
+                          "text-xs hover:underline",
+                          h.isShared ? "text-muted-foreground cursor-default" : "text-primary"
+                        )}
+                        disabled={h.isShared}
+                      >
+                        {h.isShared ? (
+                          <span className="inline-flex items-center gap-1">
+                            <Check className="h-3 w-3" />
+                            Shared
+                          </span>
+                        ) : (
+                          "Share"
+                        )}
                       </button>
+
                       <button
                         onClick={() => deleteHighlight(h.id)}
                         className="text-xs text-muted-foreground hover:text-destructive"
@@ -839,7 +806,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
                       <p className="mt-1 text-sm text-foreground/80">{comment.text}</p>
 
-                      {/* Reactions */}
                       <div className="mt-2 flex items-center gap-1 flex-wrap">
                         {comment.reactions.map((reaction) => (
                           <button
@@ -847,7 +813,9 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
                             onClick={() => toggleReaction(comment.id, reaction.emoji)}
                             className={cn(
                               "flex items-center gap-1 rounded-full px-2 py-0.5 text-xs transition-colors",
-                              reaction.reacted ? "bg-primary/20 text-primary" : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                              reaction.reacted
+                                ? "bg-primary/20 text-primary"
+                                : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
                             )}
                           >
                             <span>{reaction.emoji}</span>
@@ -855,7 +823,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
                           </button>
                         ))}
 
-                        {/* Add reaction */}
                         <div className="relative group">
                           <button className="flex items-center justify-center h-6 w-6 rounded-full bg-secondary text-muted-foreground hover:bg-secondary/80">
                             <Plus className="h-3 w-3" />
@@ -883,7 +850,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
             <p className="text-sm text-muted-foreground">No comments yet. Be the first to comment!</p>
           )}
 
-          {/* Comment Input */}
           <div className="mt-4 flex items-center gap-2">
             <input
               type="text"
@@ -954,12 +920,13 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
                   <button
                     key={circle}
                     onClick={async () => {
-                      // highlight id가 없으면(선택 텍스트 공유) -> 먼저 highlight 생성 후 shared 처리
-                      if (!highlightToShare) {
+                      // 헤더 Share 버튼으로 들어온 경우: 그냥 닫기
+                      if (!highlightToShare?.quote) {
                         setShowShareModal(false)
                         return
                       }
 
+                      // 선택 텍스트 공유(아직 highlight id 없음) -> 먼저 생성 -> shared 처리
                       if (!highlightToShare.id) {
                         const created = await createHighlight(highlightToShare.quote)
                         if (created) await markHighlightShared(created.id)
@@ -1040,4 +1007,9 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
       </AnimatePresence>
     </div>
   )
+}
+
+/** tiny helper */
+function forceToggle(setter: (v: boolean) => void) {
+  setter((prev) => !prev)
 }
