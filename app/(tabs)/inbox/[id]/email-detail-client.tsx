@@ -190,6 +190,10 @@ function isValidEmailIdValue(v: string) {
   return Boolean(v && v !== "undefined" && v !== "null")
 }
 
+/** ✅ (A) UUID 유틸 추가 */
+const isUuid = (v: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+
 /** tiny helper */
 function forceToggle(setter: (v: boolean | ((prev: boolean) => boolean)) => void) {
   setter((prev: boolean) => !prev)
@@ -199,7 +203,9 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const router = useRouter()
 
   // ✅ early return 금지 → 대신 “유효성 플래그”로만 처리
-  const isValidEmailId = isValidEmailIdValue(emailId)
+  // - 기본 값(undefined/null/"undefined")도 막고
+  // - mock id(nl-2 등)도 막기 위해 uuid까지 체크
+  const isValidEmailId = isValidEmailIdValue(emailId) && isUuid(emailId)
 
   /** -----------------------------
    * DB email state
@@ -211,24 +217,24 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 
   const [dbEmail, setDbEmail] = useState<DbEmailRow | null>(initialDbEmail)
   const [loading, setLoading] = useState(!initialDbEmail)
-  const [error, setError] = useState<string | null>(
-    serverData?.ok ? null : serverData?.error ?? null
-  )
+  const [error, setError] = useState<string | null>(serverData?.ok ? null : serverData?.error ?? null)
 
-  // 단건 이메일 로드
+  /** ✅ (B) 단건 이메일 로드: UUID 아니면 fetch 자체를 절대 안 함 */
   useEffect(() => {
-    // invalid면 상태만 정리하고 끝 (hook은 항상 호출됨)
-    if (!isValidEmailId) {
-      setDbEmail(null)
-      setLoading(false)
-      setError("Invalid email id")
-      return
-    }
-
-    if (dbEmail) return
     let cancelled = false
 
     async function run() {
+      // ✅ invalid면 서버를 치지 않는다 (400 방지)
+      if (!isValidEmailId) {
+        setDbEmail(null)
+        setLoading(false)
+        setError("Invalid email id")
+        return
+      }
+
+      // 이미 있으면 스킵
+      if (dbEmail) return
+
       try {
         setLoading(true)
         const res = await fetch(`/api/inbox-emails/${emailId}`, {
@@ -239,7 +245,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         if (cancelled) return
 
         if (!data.ok) {
-          setError(data.error ?? "Unauthorized or not found")
+          setError(data.error ?? `Failed to load (HTTP ${res.status})`)
           setLoading(false)
           return
         }
@@ -247,14 +253,16 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         setDbEmail(data.email)
         setError(null)
         setLoading(false)
-      } catch {
+      } catch (e: any) {
         if (cancelled) return
-        setError("Failed to load email")
+        setError(e?.message ?? "Failed to load email")
         setLoading(false)
       }
     }
 
-    run()
+    // 초기 데이터가 없을 때만 로드
+    if (!dbEmail) run()
+
     return () => {
       cancelled = true
     }
@@ -301,9 +309,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const [showShareModal, setShowShareModal] = useState(false)
   const [showCreateOptions, setShowCreateOptions] = useState(false)
 
-  const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(
-    null
-  )
+  const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(null)
 
   const [highlights, setHighlights] = useState<Highlight[]>([])
   const [comments, setComments] = useState<Comment[]>([])
@@ -587,9 +593,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
       const data = await safeReadJson<ApiReactionToggleResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to toggle reaction")
 
-      setComments((cur) =>
-        cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c))
-      )
+      setComments((cur) => (cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c))))
     } catch {
       setComments(prev)
     }
