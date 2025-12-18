@@ -1,6 +1,6 @@
+// app/api/inbox-emails/[id]/route.ts
 import { NextRequest, NextResponse } from "next/server"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
-import type { SupabaseClient } from "@supabase/supabase-js"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -13,70 +13,69 @@ type DbEmailRow = {
   from_address: string | null
   to_address?: string | null
   subject: string | null
-  body_text: string | null
   body_html: string | null
+  body_text: string | null
   raw: any
   received_at: string | null
 }
 
-/**
- * Helper: Validate email ownership
- * - Uses the SAME supabase client created per-request (cookie/session safe)
- * - Returns email row if found and owned by user, null otherwise
- */
 async function validateEmailOwnership(
-  supabase: SupabaseClient,
+  supabase: ReturnType<typeof createSupabaseServerClient>,
   emailId: string,
   userId: string
 ): Promise<DbEmailRow | null> {
-  try {
-    const { data: emailRow, error } = await supabase
-      .from("inbox_emails")
-      .select(
-        "id,user_id,address_id,message_id,from_address,to_address,subject,body_text,body_html,raw,received_at"
-      )
-      .eq("id", emailId)
-      .single()
+  const { data: emailRow, error } = await supabase
+    .from("inbox_emails")
+    .select(
+      "id,user_id,address_id,message_id,from_address,to_address,subject,body_text,body_html,raw,received_at"
+    )
+    .eq("id", emailId)
+    .single()
 
-    if (error || !emailRow) return null
-    if (emailRow.user_id !== userId) return null
-
-    return emailRow as DbEmailRow
-  } catch {
-    return null
-  }
+  if (error || !emailRow) return null
+  if (emailRow.user_id !== userId) return null
+  return emailRow as DbEmailRow
 }
 
 export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
   try {
-    const { id } = params
-    if (!id) {
-      return NextResponse.json({ ok: false, error: "Missing id" }, { status: 400 })
+    const id = params?.id
+
+    // "undefined" 같은 잘못된 호출은 400으로 빨리 컷
+    if (!id || id === "undefined" || id === "null") {
+      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
     }
 
-    // Instantiate Supabase client (per request)
     const supabase = createSupabaseServerClient()
 
-    // Auth check
     const {
       data: { user },
       error: userError,
     } = await supabase.auth.getUser()
 
-    // Debug logging (dev only - remove later if you want)
-    console.log("GET /api/inbox-emails/[id] auth user", user?.id, "auth error", userError?.message)
-
+    // 서버에서 세션 못 읽으면 여기로 떨어짐(401)
     if (userError || !user) {
-      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+      return NextResponse.json(
+        { ok: false, error: "Unauthorized" },
+        {
+          status: 401,
+          headers: { "cache-control": "no-store" },
+        }
+      )
     }
 
-    // Ownership check (reuse same supabase instance)
     const email = await validateEmailOwnership(supabase, id, user.id)
     if (!email) {
       return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
     }
 
-    return NextResponse.json({ ok: true, email }, { status: 200 })
+    return NextResponse.json(
+      { ok: true, email },
+      {
+        status: 200,
+        headers: { "cache-control": "no-store" },
+      }
+    )
   } catch (e) {
     console.error("GET /api/inbox-emails/[id] error:", e)
     return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })

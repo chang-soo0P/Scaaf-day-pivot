@@ -189,6 +189,11 @@ function basicSanitizeHtml(input: string) {
 export default function EmailDetailClient({ emailId, serverData }: EmailDetailClientProps) {
   const router = useRouter()
 
+  // Guard: emailId가 없으면 렌더링하지 않음
+  if (!emailId || emailId === "undefined" || emailId === "null") {
+    return null
+  }
+
   /** -----------------------------
    * DB email state
    * ------------------------------*/
@@ -208,7 +213,10 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     async function run() {
       try {
         setLoading(true)
-        const res = await fetch(`/api/inbox-emails/${emailId}`, { cache: "no-store" })
+        const res = await fetch(`/api/inbox-emails/${emailId}`, {
+          cache: "no-store",
+          credentials: "include",
+        })
         const data = await safeReadJson<ApiSingleEmailResponse>(res)
         if (cancelled) return
 
@@ -287,9 +295,13 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   useEffect(() => {
     let cancelled = false
     async function load() {
+      if (!emailId) return
       try {
         setHighlightsLoading(true)
-        const res = await fetch(`/api/inbox-emails/${emailId}/highlights`, { cache: "no-store" })
+        const res = await fetch(`/api/inbox-emails/${emailId}/highlights`, {
+          cache: "no-store",
+          credentials: "include",
+        })
         const data = await safeReadJson<ApiHighlightsListResponse>(res)
         if (cancelled) return
 
@@ -317,9 +329,13 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   useEffect(() => {
     let cancelled = false
     async function load() {
+      if (!emailId) return
       try {
         setCommentsLoading(true)
-        const res = await fetch(`/api/inbox-emails/${emailId}/comments`, { cache: "no-store" })
+        const res = await fetch(`/api/inbox-emails/${emailId}/comments`, {
+          cache: "no-store",
+          credentials: "include",
+        })
         const data = await safeReadJson<ApiCommentsListResponse>(res)
         if (cancelled) return
 
@@ -384,6 +400,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ quote }),
+        credentials: "include",
       })
       const data = await safeReadJson<ApiHighlightCreateResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to create highlight")
@@ -475,6 +492,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text, authorName: "You", authorAvatarColor: "#3b82f6" }),
+        credentials: "include",
       })
       const data = await safeReadJson<ApiCommentCreateResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to create comment")
@@ -1010,6 +1028,6 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
 }
 
 /** tiny helper */
-function forceToggle(setter: (v: boolean) => void) {
-  setter((prev) => !prev)
+function forceToggle(setter: (v: boolean | ((prev: boolean) => boolean)) => void) {
+  setter((prev: boolean) => !prev)
 }
