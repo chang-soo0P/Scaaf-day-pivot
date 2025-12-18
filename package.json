@@ -4,8 +4,10 @@
   "private": true,
   "scripts": {
     "build": "next build",
-    "dev": "next dev --no-turbo",
-    "dev:turbo": "next dev",
+    "dev": "next dev",
+    "dev:turbo": "next dev --turbo",
+    "dev:webpack": "next dev --webpack",
+    "dev:3000": "next dev -p 3000",
     "clean": "rm -rf .next node_modules",
     "reinstall": "pnpm store prune && rm -rf node_modules .next && pnpm install",
     "lint": "eslint .",
