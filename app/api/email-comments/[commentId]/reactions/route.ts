@@ -1,24 +1,36 @@
-import { NextResponse } from "next/server"
-import { supabaseRouteClient } from "@/app/api/_supabase/route-client"
+import { NextRequest, NextResponse } from "next/server"
+import { createSupabaseServerClient } from "@/lib/supabase/server"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-export async function POST(req: Request, { params }: { params: { commentId: string } }) {
-  try {
-    const supabase = supabaseRouteClient()
-    const { data: auth } = await supabase.auth.getUser()
-    const user = auth.user
-    if (!user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-    const commentId = params.commentId
+async function getParamId(ctx: any) {
+  const p = ctx?.params
+  if (p && typeof p.then === "function") return (await p).commentId
+  return p?.commentId
+}
+
+export async function POST(req: NextRequest, ctx: any) {
+  try {
+    const commentId = await getParamId(ctx)
+    if (!commentId || !UUID_RE.test(commentId)) {
+      return NextResponse.json({ ok: false, error: "Invalid comment id" }, { status: 400 })
+    }
+
+    const supabase = await createSupabaseServerClient()
+    const { data: { user }, error: userErr } = await supabase.auth.getUser()
+    if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+
     const body = await req.json().catch(() => ({}))
-    const emoji = String(body?.emoji ?? "").trim()
+    const emoji = typeof body?.emoji === "string" ? body.emoji.trim() : ""
     if (!emoji) return NextResponse.json({ ok: false, error: "Missing emoji" }, { status: 400 })
 
-    // 존재하면 삭제, 없으면 추가 (토글)
+    // toggle
     const { data: existing } = await supabase
-      .from("comment_reactions")
+      .from("email_comment_reactions")
       .select("id")
       .eq("comment_id", commentId)
       .eq("user_id", user.id)
@@ -26,30 +38,30 @@ export async function POST(req: Request, { params }: { params: { commentId: stri
       .maybeSingle()
 
     if (existing?.id) {
-      const { error } = await supabase.from("comment_reactions").delete().eq("id", existing.id)
-      if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+      await supabase.from("email_comment_reactions").delete().eq("id", existing.id)
     } else {
-      const { error } = await supabase.from("comment_reactions").insert({ comment_id: commentId, user_id: user.id, emoji })
-      if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+      await supabase.from("email_comment_reactions").insert({ comment_id: commentId, user_id: user.id, emoji })
     }
 
-    // 최신 집계 반환
-    const { data: rows, error: rErr } = await supabase
-      .from("comment_reactions")
+    // aggregate
+    const { data: rows, error } = await supabase
+      .from("email_comment_reactions")
       .select("emoji,user_id")
       .eq("comment_id", commentId)
 
-    if (rErr) return NextResponse.json({ ok: false, error: rErr.message }, { status: 500 })
+    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
 
-    const map = new Map<string, { count: number; reacted: boolean }>()
+    const map = new Map<string, { emoji: string; count: number; reacted: boolean }>()
     for (const r of rows ?? []) {
-      const curr = map.get(r.emoji) ?? { count: 0, reacted: false }
-      map.set(r.emoji, { count: curr.count + 1, reacted: curr.reacted || r.user_id === user.id })
+      const cur = map.get(r.emoji) ?? { emoji: r.emoji, count: 0, reacted: false }
+      cur.count += 1
+      if (r.user_id === user.id) cur.reacted = true
+      map.set(r.emoji, cur)
     }
 
-    const reactions = Array.from(map.entries()).map(([emoji, v]) => ({ emoji, count: v.count, reacted: v.reacted }))
-    return NextResponse.json({ ok: true, reactions }, { status: 200 })
-  } catch {
-    return NextResponse.json({ ok: false, error: "Server error" }, { status: 500 })
+    return NextResponse.json({ ok: true, reactions: Array.from(map.values()) }, { status: 200 })
+  } catch (e: any) {
+    console.error("POST reactions error:", e?.message ?? e)
+    return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
   }
 }

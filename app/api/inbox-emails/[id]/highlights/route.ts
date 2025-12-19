@@ -5,55 +5,26 @@ import { createSupabaseServerClient } from "@/lib/supabase/server"
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-async function validateEmailOwnership(
-  supabase: ReturnType<typeof createSupabaseServerClient>,
-  emailId: string,
-  userId: string
-): Promise<boolean> {
-  const { data: emailRow, error } = await supabase
-    .from("inbox_emails")
-    .select("id,user_id")
-    .eq("id", emailId)
-    .single()
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-  if (error || !emailRow) return false
-  return emailRow.user_id === userId
+async function getParamId(ctx: any) {
+  const p = ctx?.params
+  if (p && typeof p.then === "function") return (await p).id
+  return p?.id
 }
 
-export async function GET(_req: NextRequest, { params }: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: any) {
   try {
-    const id = params?.id
-
-    // "undefined" 같은 잘못된 호출은 400으로 빨리 컷
-    if (!id || id === "undefined" || id === "null") {
-      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
+    const id = await getParamId(ctx)
+    if (!id || !UUID_RE.test(id)) {
+      return NextResponse.json({ ok: false, error: "Invalid email id" }, { status: 400 })
     }
 
-    const supabase = createSupabaseServerClient()
+    const supabase = await createSupabaseServerClient()
+    const { data: { user }, error: userErr } = await supabase.auth.getUser()
+    if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser()
-
-    // 서버에서 세션 못 읽으면 여기로 떨어짐(401)
-    if (userError || !user) {
-      return NextResponse.json(
-        { ok: false, error: "Unauthorized" },
-        {
-          status: 401,
-          headers: { "cache-control": "no-store" },
-        }
-      )
-    }
-
-    // Ownership check
-    const isOwner = await validateEmailOwnership(supabase, id, user.id)
-    if (!isOwner) {
-      return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
-    }
-
-    // Fetch highlights
     const { data, error } = await supabase
       .from("email_highlights")
       .select("id,quote,memo,is_shared,created_at")
@@ -61,91 +32,61 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
 
-    if (error) {
-      return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
-    }
+    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
 
-    return NextResponse.json(
-      { ok: true, highlights: data ?? [] },
-      {
-        status: 200,
-        headers: { "cache-control": "no-store" },
-      }
-    )
-  } catch (e) {
-    console.error("GET /api/inbox-emails/[id]/highlights error:", e)
+    const highlights = (data ?? []).map((h) => ({
+      id: h.id,
+      quote: h.quote,
+      memo: h.memo ?? undefined,
+      isShared: !!h.is_shared,
+      createdAt: h.created_at,
+    }))
+
+    return NextResponse.json({ ok: true, highlights }, { status: 200 })
+  } catch (e: any) {
+    console.error("GET highlights error:", e?.message ?? e)
     return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
   }
 }
 
-export async function POST(req: NextRequest, { params }: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: any) {
   try {
-    const id = params?.id
-
-    // "undefined" 같은 잘못된 호출은 400으로 빨리 컷
-    if (!id || id === "undefined" || id === "null") {
-      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
+    const id = await getParamId(ctx)
+    if (!id || !UUID_RE.test(id)) {
+      return NextResponse.json({ ok: false, error: "Invalid email id" }, { status: 400 })
     }
 
-    const supabase = createSupabaseServerClient()
+    const supabase = await createSupabaseServerClient()
+    const { data: { user }, error: userErr } = await supabase.auth.getUser()
+    if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    const {
-      data: { user },
-      error: userError,
-    } = await supabase.auth.getUser()
+    const body = await req.json().catch(() => ({}))
+    const quote = typeof body?.quote === "string" ? body.quote.trim() : ""
+    if (!quote) return NextResponse.json({ ok: false, error: "Missing quote" }, { status: 400 })
 
-    // 서버에서 세션 못 읽으면 여기로 떨어짐(401)
-    if (userError || !user) {
-      return NextResponse.json(
-        { ok: false, error: "Unauthorized" },
-        {
-          status: 401,
-          headers: { "cache-control": "no-store" },
-        }
-      )
-    }
-
-    // Parse body
-    let body: any = {}
-    try {
-      body = await req.json()
-    } catch {
-      return NextResponse.json({ ok: false, error: "Bad request" }, { status: 400 })
-    }
-
-    const quote = String(body?.quote ?? "").trim()
-    if (!quote) {
-      return NextResponse.json({ ok: false, error: "Bad request" }, { status: 400 })
-    }
-
-    const memo = body?.memo ? String(body.memo).trim() : null
-
-    // Ownership check
-    const isOwner = await validateEmailOwnership(supabase, id, user.id)
-    if (!isOwner) {
-      return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
-    }
-
-    // Create highlight (is_shared defaults to false)
     const { data, error } = await supabase
       .from("email_highlights")
-      .insert({ email_id: id, user_id: user.id, quote, memo, is_shared: false })
+      .insert({ email_id: id, user_id: user.id, quote, memo: null, is_shared: false })
       .select("id,quote,memo,is_shared,created_at")
       .single()
 
-    if (error) {
-      return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
-    }
+    if (error || !data) return NextResponse.json({ ok: false, error: error?.message ?? "Insert failed" }, { status: 500 })
 
     return NextResponse.json(
-      { ok: true, highlight: data },
       {
-        status: 200,
-        headers: { "cache-control": "no-store" },
-      }
+        ok: true,
+        highlight: {
+          id: data.id,
+          quote: data.quote,
+          memo: data.memo ?? undefined,
+          isShared: !!data.is_shared,
+          createdAt: data.created_at,
+        },
+      },
+      { status: 200 }
     )
-  } catch (e) {
-    console.error("POST /api/inbox-emails/[id]/highlights error:", e)
+  } catch (e: any) {
+    console.error("POST highlights error:", e?.message ?? e)
     return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
   }
 }
