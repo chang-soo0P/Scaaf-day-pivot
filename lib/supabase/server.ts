@@ -1,24 +1,28 @@
-// lib/supabase/server.ts
 import { cookies } from "next/headers"
 import { createServerClient } from "@supabase/ssr"
 
-export function createSupabaseServerClient() {
-  const cookieStore = cookies()
+export const runtime = "nodejs"
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  if (!url || !anon) throw new Error("Missing Supabase env vars")
+export async function createSupabaseServerClient() {
+  const cookieStore = await cookies()
 
-  return createServerClient(url, anon, {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+  const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+
+  return createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
       getAll() {
+        // ✅ Next 16: cookieStore는 await cookies()로 가져와야 getAll이 존재
         return cookieStore.getAll()
       },
       setAll(cookiesToSet) {
+        // Route Handler에서 set이 막히는 경우가 있어 try/catch로 무조건 안전하게
         try {
-          cookiesToSet.forEach(({ name, value, options }) => cookieStore.set(name, value, options))
+          for (const { name, value, options } of cookiesToSet) {
+            cookieStore.set(name, value, options)
+          }
         } catch {
-          // Server Component에서 set 시도하면 실패할 수 있음 (Route Handler에선 정상)
+          // Server Component 등에서는 set 불가할 수 있음 → 무시
         }
       },
     },

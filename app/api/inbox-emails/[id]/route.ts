@@ -11,33 +11,30 @@ function isUuid(v: string) {
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id: emailId } = await params
+    if (!isUuid(emailId)) return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
 
-    if (!isUuid(emailId)) {
-      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
-    }
+    const supabase = await createSupabaseServerClient()
 
-    const supabase = createSupabaseServerClient()
     const {
       data: { user },
       error: userError,
     } = await supabase.auth.getUser()
 
-    if (userError || !user) {
-      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
-    }
+    if (userError || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    // ✅ ownership check: inbox_emails.user_id === auth.user.id
     const { data: email, error } = await supabase
       .from("inbox_emails")
       .select("id,user_id,address_id,message_id,from_address,to_address,subject,body_text,body_html,raw,received_at")
       .eq("id", emailId)
       .eq("user_id", user.id)
-      .single()
+      .maybeSingle()
 
-    if (error || !email) {
-      // 소유권/존재 둘 다 여기서 걸림
-      return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
+    if (error) {
+      console.error("inbox_emails select error:", error)
+      return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
     }
+
+    if (!email) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
 
     return NextResponse.json({ ok: true, email }, { status: 200 })
   } catch (e) {
