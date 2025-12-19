@@ -1,104 +1,86 @@
 import { NextRequest, NextResponse } from "next/server"
-import { z } from "zod"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-const ParamsSchema = z.object({
-  id: z.string().uuid(),
-})
-
-const CreateSchema = z.object({
-  text: z.string().min(1).max(5000),
-  authorName: z.string().min(1).max(80).optional(),
-  authorAvatarColor: z.string().min(1).max(30).optional(),
-})
-
-async function getAuthedUserId() {
-  const supabase = createSupabaseServerClient()
-  const { data, error } = await supabase.auth.getUser()
-  if (error || !data?.user?.id) return null
-  return data.user.id
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+}
+async function getParam(ctx: any, key: string) {
+  const p = await Promise.resolve(ctx?.params)
+  return p?.[key] as string | undefined
+}
+async function assertOwnedEmail(supabase: any, emailId: string, userId: string) {
+  const { data, error } = await supabase.from("inbox_emails").select("id,user_id").eq("id", emailId).single()
+  if (error || !data) return null
+  if (data.user_id !== userId) return null
+  return data
 }
 
-async function assertEmailOwnership(emailId: string, userId: string) {
-  const supabase = createSupabaseServerClient()
-  const { data, error } = await supabase
-    .from("inbox_emails")
-    .select("id,user_id")
-    .eq("id", emailId)
-    .eq("user_id", userId)
-    .single()
-
-  if (error || !data) return false
-  return true
-}
-
-function buildReactions(rows: { emoji: string; user_id: string }[], me: string) {
-  const map = new Map<string, { emoji: string; count: number; reacted: boolean }>()
-  for (const r of rows) {
-    const cur = map.get(r.emoji) ?? { emoji: r.emoji, count: 0, reacted: false }
-    cur.count += 1
-    if (r.user_id === me) cur.reacted = true
-    map.set(r.emoji, cur)
-  }
-  return Array.from(map.values()).sort((a, b) => b.count - a.count)
-}
-
-export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
+export async function GET(_req: NextRequest, ctx: any) {
   try {
-    const parsedParams = ParamsSchema.safeParse(ctx.params)
-    if (!parsedParams.success) {
-      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
+    const emailId = await getParam(ctx, "id")
+    if (!emailId || !isUuid(emailId)) {
+      return NextResponse.json({ ok: false, error: "Bad Request: invalid id" }, { status: 400 })
     }
-    const { id: emailId } = parsedParams.data
-
-    const userId = await getAuthedUserId()
-    if (!userId) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
-
-    // email 소유권 체크 (Option A)
-    const ok = await assertEmailOwnership(emailId, userId)
-    if (!ok) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
 
     const supabase = createSupabaseServerClient()
+    const { data: auth, error: authErr } = await supabase.auth.getUser()
+    if (authErr || !auth?.user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    // comments
-    const { data: commentsRows, error: cErr } = await supabase
+    const owned = await assertOwnedEmail(supabase, emailId, auth.user.id)
+    if (!owned) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
+
+    const { data: rows, error } = await supabase
       .from("email_comments")
-      .select("id, email_id, user_id, text, author_name, author_avatar_color, created_at")
+      .select("id,email_id,user_id,text,created_at")
       .eq("email_id", emailId)
       .order("created_at", { ascending: true })
 
-    if (cErr) return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+    if (error) return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
 
-    const commentIds = (commentsRows ?? []).map((c) => c.id)
+    const commentIds = (rows ?? []).map((r: any) => r.id)
+    let reactionsByComment: Record<string, any[]> = {}
 
-    // reactions 한번에 가져오기
-    let reactionsByComment = new Map<string, { emoji: string; user_id: string }[]>()
-    if (commentIds.length > 0) {
-      const { data: rRows, error: rErr } = await supabase
+    if (commentIds.length) {
+      const { data: reacts } = await supabase
         .from("email_comment_reactions")
-        .select("comment_id, emoji, user_id")
+        .select("comment_id,user_id,emoji,created_at")
         .in("comment_id", commentIds)
 
-      if (rErr) return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+      const map: Record<string, { emoji: string; count: number; reacted: boolean }[]> = {}
+      const countMap: Record<string, Record<string, number>> = {}
+      const reactedMap: Record<string, Record<string, boolean>> = {}
 
-      for (const r of rRows ?? []) {
-        const arr = reactionsByComment.get(r.comment_id) ?? []
-        arr.push({ emoji: r.emoji, user_id: r.user_id })
-        reactionsByComment.set(r.comment_id, arr)
+      for (const r of reacts ?? []) {
+        const cid = r.comment_id
+        const emoji = r.emoji
+        countMap[cid] ||= {}
+        reactedMap[cid] ||= {}
+        countMap[cid][emoji] = (countMap[cid][emoji] ?? 0) + 1
+        if (r.user_id === auth.user.id) reactedMap[cid][emoji] = true
       }
+
+      for (const cid of Object.keys(countMap)) {
+        map[cid] = Object.keys(countMap[cid]).map((emoji) => ({
+          emoji,
+          count: countMap[cid][emoji],
+          reacted: !!reactedMap[cid]?.[emoji],
+        }))
+      }
+
+      reactionsByComment = map as any
     }
 
     const comments =
-      (commentsRows ?? []).map((c) => ({
+      (rows ?? []).map((c: any) => ({
         id: c.id,
-        authorName: c.author_name ?? "You",
-        authorAvatarColor: c.author_avatar_color ?? "#3b82f6",
+        authorName: "You",
+        authorAvatarColor: "#3b82f6",
         text: c.text,
         createdAt: c.created_at,
-        reactions: buildReactions(reactionsByComment.get(c.id) ?? [], userId),
+        reactions: reactionsByComment[c.id] ?? [],
       })) ?? []
 
     return NextResponse.json({ ok: true, comments }, { status: 200 })
@@ -108,58 +90,42 @@ export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
   }
 }
 
-export async function POST(req: NextRequest, ctx: { params: { id: string } }) {
+export async function POST(req: NextRequest, ctx: any) {
   try {
-    const parsedParams = ParamsSchema.safeParse(ctx.params)
-    if (!parsedParams.success) {
-      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
-    }
-    const { id: emailId } = parsedParams.data
-
-    const userId = await getAuthedUserId()
-    if (!userId) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
-
-    // email 소유권 체크 (Option A)
-    const ok = await assertEmailOwnership(emailId, userId)
-    if (!ok) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
-
-    const bodyJson = await req.json().catch(() => null)
-    const parsedBody = CreateSchema.safeParse(bodyJson)
-    if (!parsedBody.success) {
-      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
+    const emailId = await getParam(ctx, "id")
+    if (!emailId || !isUuid(emailId)) {
+      return NextResponse.json({ ok: false, error: "Bad Request: invalid id" }, { status: 400 })
     }
 
     const supabase = createSupabaseServerClient()
-    const { data: created, error } = await supabase
+    const { data: auth, error: authErr } = await supabase.auth.getUser()
+    if (authErr || !auth?.user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+
+    const owned = await assertOwnedEmail(supabase, emailId, auth.user.id)
+    if (!owned) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
+
+    const body = await req.json().catch(() => ({}))
+    const text = typeof body?.text === "string" ? body.text.trim() : ""
+    if (!text) return NextResponse.json({ ok: false, error: "Bad Request: empty text" }, { status: 400 })
+
+    const { data, error } = await supabase
       .from("email_comments")
-      .insert({
-        email_id: emailId,
-        user_id: userId,
-        text: parsedBody.data.text,
-        author_name: parsedBody.data.authorName ?? "You",
-        author_avatar_color: parsedBody.data.authorAvatarColor ?? "#3b82f6",
-      })
-      .select("id, text, author_name, author_avatar_color, created_at")
+      .insert({ email_id: emailId, user_id: auth.user.id, text })
+      .select("id,text,created_at")
       .single()
 
-    if (error || !created) {
-      return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+    if (error || !data) return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+
+    const comment = {
+      id: data.id,
+      authorName: "You",
+      authorAvatarColor: "#3b82f6",
+      text: data.text,
+      createdAt: data.created_at,
+      reactions: [],
     }
 
-    return NextResponse.json(
-      {
-        ok: true,
-        comment: {
-          id: created.id,
-          authorName: created.author_name ?? "You",
-          authorAvatarColor: created.author_avatar_color ?? "#3b82f6",
-          text: created.text,
-          createdAt: created.created_at,
-          reactions: [],
-        },
-      },
-      { status: 200 }
-    )
+    return NextResponse.json({ ok: true, comment }, { status: 200 })
   } catch (e) {
     console.error("POST /api/inbox-emails/[id]/comments error:", e)
     return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })

@@ -1,128 +1,67 @@
 import { NextRequest, NextResponse } from "next/server"
-import { z } from "zod"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-const ParamsSchema = z.object({
-  commentId: z.string().uuid(),
-})
-
-const BodySchema = z.object({
-  emoji: z.string().min(1).max(10),
-})
-
-async function getAuthedUserId() {
-  const supabase = createSupabaseServerClient()
-  const { data, error } = await supabase.auth.getUser()
-  if (error || !data?.user?.id) return null
-  return data.user.id
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+}
+async function getParam(ctx: any, key: string) {
+  const p = await Promise.resolve(ctx?.params)
+  return p?.[key] as string | undefined
 }
 
-/**
- * Option A: comment가 존재하고,
- *  - comment가 달린 email(inbox_emails)이 내 것인지 확인
- *  - (추가로) reactions 테이블 접근 전에 최소한 comment 존재 확인
- */
-async function assertCommentReadable(commentId: string, userId: string) {
-  const supabase = createSupabaseServerClient()
-
-  const { data: c, error: cErr } = await supabase
-    .from("email_comments")
-    .select("id, email_id")
-    .eq("id", commentId)
-    .single()
-
-  if (cErr || !c) return null
-
-  const { data: e, error: eErr } = await supabase
-    .from("inbox_emails")
-    .select("id, user_id")
-    .eq("id", c.email_id)
-    .single()
-
-  if (eErr || !e) return null
-  if (e.user_id !== userId) return null
-
-  return c
-}
-
-function buildReactions(rows: { emoji: string; user_id: string }[], me: string) {
-  const map = new Map<string, { emoji: string; count: number; reacted: boolean }>()
-  for (const r of rows) {
-    const cur = map.get(r.emoji) ?? { emoji: r.emoji, count: 0, reacted: false }
-    cur.count += 1
-    if (r.user_id === me) cur.reacted = true
-    map.set(r.emoji, cur)
-  }
-  return Array.from(map.values()).sort((a, b) => b.count - a.count)
-}
-
-export async function POST(req: NextRequest, ctx: { params: { commentId: string } }) {
+export async function POST(req: NextRequest, ctx: any) {
   try {
-    const parsedParams = ParamsSchema.safeParse(ctx.params)
-    if (!parsedParams.success) {
-      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
-    }
-    const { commentId } = parsedParams.data
-
-    const userId = await getAuthedUserId()
-    if (!userId) {
-      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
-    }
-
-    const bodyJson = await req.json().catch(() => null)
-    const parsedBody = BodySchema.safeParse(bodyJson)
-    if (!parsedBody.success) {
-      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
-    }
-
-    // comment + email 소유권 체크
-    const readable = await assertCommentReadable(commentId, userId)
-    if (!readable) {
-      return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
+    const commentId = await getParam(ctx, "commentId")
+    if (!commentId || !isUuid(commentId)) {
+      return NextResponse.json({ ok: false, error: "Bad Request: invalid commentId" }, { status: 400 })
     }
 
     const supabase = createSupabaseServerClient()
-    const emoji = parsedBody.data.emoji
+    const { data: auth, error: authErr } = await supabase.auth.getUser()
+    if (authErr || !auth?.user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    // toggle
-    const { data: existing, error: exErr } = await supabase
+    const body = await req.json().catch(() => ({}))
+    const emoji = typeof body?.emoji === "string" ? body.emoji.trim() : ""
+    if (!emoji) return NextResponse.json({ ok: false, error: "Bad Request: empty emoji" }, { status: 400 })
+
+    // ✅ 내 반응 존재 여부 확인
+    const { data: existing } = await supabase
       .from("email_comment_reactions")
       .select("id")
       .eq("comment_id", commentId)
-      .eq("user_id", userId)
+      .eq("user_id", auth.user.id)
       .eq("emoji", emoji)
       .maybeSingle()
 
-    if (exErr) {
-      return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
-    }
-
     if (existing?.id) {
-      const { error: delErr } = await supabase.from("email_comment_reactions").delete().eq("id", existing.id)
-      if (delErr) return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+      await supabase.from("email_comment_reactions").delete().eq("id", existing.id)
     } else {
-      const { error: insErr } = await supabase.from("email_comment_reactions").insert({
-        comment_id: commentId,
-        user_id: userId,
-        emoji,
-      })
-      if (insErr) return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+      await supabase.from("email_comment_reactions").insert({ comment_id: commentId, user_id: auth.user.id, emoji })
     }
 
-    // return aggregated reactions
-    const { data: rows, error: listErr } = await supabase
+    // ✅ 최신 reactions 재계산
+    const { data: reacts } = await supabase
       .from("email_comment_reactions")
-      .select("emoji, user_id")
+      .select("user_id,emoji")
       .eq("comment_id", commentId)
 
-    if (listErr) {
-      return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+    const countMap: Record<string, number> = {}
+    const reactedMap: Record<string, boolean> = {}
+    for (const r of reacts ?? []) {
+      countMap[r.emoji] = (countMap[r.emoji] ?? 0) + 1
+      if (r.user_id === auth.user.id) reactedMap[r.emoji] = true
     }
 
-    return NextResponse.json({ ok: true, reactions: buildReactions(rows ?? [], userId) }, { status: 200 })
+    const reactions = Object.keys(countMap).map((e) => ({
+      emoji: e,
+      count: countMap[e],
+      reacted: !!reactedMap[e],
+    }))
+
+    return NextResponse.json({ ok: true, reactions }, { status: 200 })
   } catch (e) {
     console.error("POST /api/email-comments/[commentId]/reactions error:", e)
     return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
