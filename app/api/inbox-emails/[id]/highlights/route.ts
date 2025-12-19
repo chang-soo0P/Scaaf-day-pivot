@@ -1,92 +1,95 @@
-// app/api/inbox-emails/[id]/highlights/route.ts
 import { NextRequest, NextResponse } from "next/server"
+import { z } from "zod"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const ParamsSchema = z.object({ id: z.string().uuid() })
+const CreateSchema = z.object({ quote: z.string().min(1).max(4000) })
 
-async function getParamId(ctx: any) {
-  const p = ctx?.params
-  if (p && typeof p.then === "function") return (await p).id
-  return p?.id
+async function assertEmailOwned(supabase: ReturnType<typeof createSupabaseServerClient>, emailId: string, userId: string) {
+  const { data, error } = await supabase
+    .from("inbox_emails")
+    .select("id")
+    .eq("id", emailId)
+    .eq("user_id", userId)
+    .single()
+  return !error && !!data
 }
 
-export async function GET(_req: NextRequest, ctx: any) {
-  try {
-    const id = await getParamId(ctx)
-    if (!id || !UUID_RE.test(id)) {
-      return NextResponse.json({ ok: false, error: "Invalid email id" }, { status: 400 })
-    }
+export async function GET(_req: NextRequest, ctx: { params: { id: string } }) {
+  const parsed = ParamsSchema.safeParse(ctx.params)
+  if (!parsed.success) return NextResponse.json({ ok: false, error: "Invalid email id" }, { status: 400 })
 
-    const supabase = await createSupabaseServerClient()
-    const { data: { user }, error: userErr } = await supabase.auth.getUser()
-    if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+  const supabase = createSupabaseServerClient()
+  const { data: auth } = await supabase.auth.getUser()
+  if (!auth?.user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    const { data, error } = await supabase
-      .from("email_highlights")
-      .select("id,quote,memo,is_shared,created_at")
-      .eq("email_id", id)
-      .eq("user_id", user.id)
-      .order("created_at", { ascending: false })
+  const emailId = parsed.data.id
+  const userId = auth.user.id
 
-    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+  const owned = await assertEmailOwned(supabase, emailId, userId)
+  if (!owned) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
 
-    const highlights = (data ?? []).map((h) => ({
-      id: h.id,
-      quote: h.quote,
-      memo: h.memo ?? undefined,
-      isShared: !!h.is_shared,
-      createdAt: h.created_at,
-    }))
+  const { data: rows, error } = await supabase
+    .from("email_highlights")
+    .select("id,quote,created_at,is_shared,memo")
+    .eq("email_id", emailId)
+    .eq("user_id", userId)
+    .order("created_at", { ascending: false })
 
-    return NextResponse.json({ ok: true, highlights }, { status: 200 })
-  } catch (e: any) {
-    console.error("GET highlights error:", e?.message ?? e)
-    return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
-  }
+  if (error) return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+
+  const highlights = (rows ?? []).map((r) => ({
+    id: r.id,
+    quote: r.quote,
+    createdAt: r.created_at,
+    isShared: r.is_shared,
+    memo: r.memo ?? undefined,
+  }))
+
+  return NextResponse.json({ ok: true, highlights }, { status: 200 })
 }
 
-export async function POST(req: NextRequest, ctx: any) {
-  try {
-    const id = await getParamId(ctx)
-    if (!id || !UUID_RE.test(id)) {
-      return NextResponse.json({ ok: false, error: "Invalid email id" }, { status: 400 })
-    }
+export async function POST(req: NextRequest, ctx: { params: { id: string } }) {
+  const parsed = ParamsSchema.safeParse(ctx.params)
+  if (!parsed.success) return NextResponse.json({ ok: false, error: "Invalid email id" }, { status: 400 })
 
-    const supabase = await createSupabaseServerClient()
-    const { data: { user }, error: userErr } = await supabase.auth.getUser()
-    if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+  const body = await req.json().catch(() => null)
+  const bodyParsed = CreateSchema.safeParse(body)
+  if (!bodyParsed.success) return NextResponse.json({ ok: false, error: "Bad request" }, { status: 400 })
 
-    const body = await req.json().catch(() => ({}))
-    const quote = typeof body?.quote === "string" ? body.quote.trim() : ""
-    if (!quote) return NextResponse.json({ ok: false, error: "Missing quote" }, { status: 400 })
+  const supabase = createSupabaseServerClient()
+  const { data: auth } = await supabase.auth.getUser()
+  if (!auth?.user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    const { data, error } = await supabase
-      .from("email_highlights")
-      .insert({ email_id: id, user_id: user.id, quote, memo: null, is_shared: false })
-      .select("id,quote,memo,is_shared,created_at")
-      .single()
+  const emailId = parsed.data.id
+  const userId = auth.user.id
 
-    if (error || !data) return NextResponse.json({ ok: false, error: error?.message ?? "Insert failed" }, { status: 500 })
+  const owned = await assertEmailOwned(supabase, emailId, userId)
+  if (!owned) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
 
-    return NextResponse.json(
-      {
-        ok: true,
-        highlight: {
-          id: data.id,
-          quote: data.quote,
-          memo: data.memo ?? undefined,
-          isShared: !!data.is_shared,
-          createdAt: data.created_at,
-        },
-      },
-      { status: 200 }
-    )
-  } catch (e: any) {
-    console.error("POST highlights error:", e?.message ?? e)
-    return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+  const { data: row, error } = await supabase
+    .from("email_highlights")
+    .insert({
+      email_id: emailId,
+      user_id: userId,      // ✅ auth uid
+      quote: bodyParsed.data.quote,
+      is_shared: false,
+    })
+    .select("id,quote,created_at,is_shared,memo")
+    .single()
+
+  if (error || !row) return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+
+  const highlight = {
+    id: row.id,
+    quote: row.quote,
+    createdAt: row.created_at,
+    isShared: row.is_shared,
+    memo: row.memo ?? undefined,
   }
+
+  return NextResponse.json({ ok: true, highlight }, { status: 200 })
 }

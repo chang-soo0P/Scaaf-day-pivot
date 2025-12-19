@@ -1,84 +1,147 @@
 import { NextRequest, NextResponse } from "next/server"
+import { z } from "zod"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const ParamsSchema = z.object({
+  highlightId: z.string().uuid(),
+})
 
-async function getParamId(ctx: any) {
-  const p = ctx?.params
-  if (p && typeof p.then === "function") return (await p).highlightId
-  return p?.highlightId
+const PatchBodySchema = z.object({
+  isShared: z.boolean().optional(),
+  memo: z.string().max(5000).nullable().optional(),
+})
+
+async function getAuthedUserId() {
+  const supabase = createSupabaseServerClient()
+  const { data, error } = await supabase.auth.getUser()
+  if (error || !data?.user?.id) return null
+  return data.user.id
 }
 
-export async function PATCH(req: NextRequest, ctx: any) {
+/**
+ * Ownership check (Option A)
+ * - highlight 존재 + highlight.user_id === userId
+ * - + email도 inbox_emails.user_id === userId (2중 체크)
+ */
+async function assertHighlightOwnership(highlightId: string, userId: string) {
+  const supabase = createSupabaseServerClient()
+
+  const { data: h, error: hErr } = await supabase
+    .from("email_highlights")
+    .select("id, email_id, user_id, is_shared, memo")
+    .eq("id", highlightId)
+    .single()
+
+  if (hErr || !h) return null
+  if (h.user_id !== userId) return null
+
+  // email 소유권도 확인 (원치 않으면 이 블록 제거 가능)
+  if (h.email_id) {
+    const { data: e, error: eErr } = await supabase
+      .from("inbox_emails")
+      .select("id, user_id")
+      .eq("id", h.email_id)
+      .single()
+
+    if (eErr || !e) return null
+    if (e.user_id !== userId) return null
+  }
+
+  return h
+}
+
+export async function PATCH(req: NextRequest, ctx: { params: { highlightId: string } }) {
   try {
-    const highlightId = await getParamId(ctx)
-    if (!highlightId || !UUID_RE.test(highlightId)) {
-      return NextResponse.json({ ok: false, error: "Invalid highlight id" }, { status: 400 })
+    const parsedParams = ParamsSchema.safeParse(ctx.params)
+    if (!parsedParams.success) {
+      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
+    }
+    const { highlightId } = parsedParams.data
+
+    const userId = await getAuthedUserId()
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
     }
 
-    const supabase = await createSupabaseServerClient()
-    const { data: { user }, error: userErr } = await supabase.auth.getUser()
-    if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+    const bodyJson = await req.json().catch(() => null)
+    const parsedBody = PatchBodySchema.safeParse(bodyJson)
+    if (!parsedBody.success) {
+      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
+    }
 
-    const body = await req.json().catch(() => ({}))
-    const patch: any = {}
-    if (typeof body?.isShared === "boolean") patch.is_shared = body.isShared
-    if (typeof body?.memo === "string") patch.memo = body.memo
+    // ownership
+    const owned = await assertHighlightOwnership(highlightId, userId)
+    if (!owned) {
+      // 옵션 A: 존재/권한 숨김
+      return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
+    }
 
-    const { data, error } = await supabase
+    const supabase = createSupabaseServerClient()
+    const patch: Record<string, any> = {}
+    if (typeof parsedBody.data.isShared === "boolean") patch.is_shared = parsedBody.data.isShared
+    if ("memo" in parsedBody.data) patch.memo = parsedBody.data.memo ?? null
+
+    const { data: updated, error: upErr } = await supabase
       .from("email_highlights")
       .update(patch)
       .eq("id", highlightId)
-      .eq("user_id", user.id)
-      .select("id,quote,memo,is_shared,created_at")
+      .select("id, quote, created_at, is_shared, memo")
       .single()
 
-    if (error || !data) return NextResponse.json({ ok: false, error: error?.message ?? "Update failed" }, { status: 500 })
+    if (upErr || !updated) {
+      return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+    }
 
     return NextResponse.json(
       {
         ok: true,
         highlight: {
-          id: data.id,
-          quote: data.quote,
-          memo: data.memo ?? undefined,
-          isShared: !!data.is_shared,
-          createdAt: data.created_at,
+          id: updated.id,
+          quote: updated.quote,
+          createdAt: updated.created_at,
+          isShared: updated.is_shared,
+          memo: updated.memo ?? undefined,
         },
       },
       { status: 200 }
     )
-  } catch (e: any) {
-    console.error("PATCH highlight error:", e?.message ?? e)
+  } catch (e) {
+    console.error("PATCH /api/email-highlights/[highlightId] error:", e)
     return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
   }
 }
 
-export async function DELETE(_req: NextRequest, ctx: any) {
+export async function DELETE(_req: NextRequest, ctx: { params: { highlightId: string } }) {
   try {
-    const highlightId = await getParamId(ctx)
-    if (!highlightId || !UUID_RE.test(highlightId)) {
-      return NextResponse.json({ ok: false, error: "Invalid highlight id" }, { status: 400 })
+    const parsedParams = ParamsSchema.safeParse(ctx.params)
+    if (!parsedParams.success) {
+      return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
+    }
+    const { highlightId } = parsedParams.data
+
+    const userId = await getAuthedUserId()
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
     }
 
-    const supabase = await createSupabaseServerClient()
-    const { data: { user }, error: userErr } = await supabase.auth.getUser()
-    if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+    // ownership
+    const owned = await assertHighlightOwnership(highlightId, userId)
+    if (!owned) {
+      return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
+    }
 
-    const { error } = await supabase
-      .from("email_highlights")
-      .delete()
-      .eq("id", highlightId)
-      .eq("user_id", user.id)
+    const supabase = createSupabaseServerClient()
+    const { error: delErr } = await supabase.from("email_highlights").delete().eq("id", highlightId)
+    if (delErr) {
+      return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
+    }
 
-    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
     return NextResponse.json({ ok: true }, { status: 200 })
-  } catch (e: any) {
-    console.error("DELETE highlight error:", e?.message ?? e)
+  } catch (e) {
+    console.error("DELETE /api/email-highlights/[highlightId] error:", e)
     return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
   }
 }
