@@ -1,16 +1,19 @@
 import { NextResponse } from "next/server"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
 
+export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
+
 function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
 }
 
-export const runtime = "nodejs"
-export const dynamic = "force-dynamic"
-
-export async function POST(req: Request, { params }: { params: { commentId: string } }) {
+export async function POST(
+  req: Request,
+  { params }: { params: Promise<{ commentId: string }> } // ✅ Next 16: params Promise
+) {
   try {
-    const commentId = params.commentId
+    const { commentId } = await params // ✅ 반드시 await
     if (!isUuid(commentId)) return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
 
     const body = await req.json().catch(() => ({}))
@@ -29,14 +32,19 @@ export async function POST(req: Request, { params }: { params: { commentId: stri
     const userId = user.id
 
     // comment 존재 확인
-    const { data: comment, error: cErr } = await supabase.from("comments").select("id,email_id").eq("id", commentId).maybeSingle()
+    const { data: comment, error: cErr } = await supabase
+      .from("comments")
+      .select("id,email_id")
+      .eq("id", commentId)
+      .maybeSingle()
+
     if (cErr) {
       console.error("[reactions] comment read error:", cErr)
       return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
     }
     if (!comment) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
 
-    // toggle existing
+    // toggle existing reaction
     const { data: existing, error: eErr } = await supabase
       .from("comment_reactions")
       .select("id")
@@ -59,7 +67,7 @@ export async function POST(req: Request, { params }: { params: { commentId: stri
     } else {
       const { error: iErr } = await supabase
         .from("comment_reactions")
-        .insert({ comment_id: commentId, user_id: userId, emoji })
+        .insert({ comment_id: commentId, user_id: userId, emoji }) // ✅ 여기 있음
 
       if (iErr) {
         console.error("[reactions] insert error:", iErr)
@@ -68,7 +76,11 @@ export async function POST(req: Request, { params }: { params: { commentId: stri
     }
 
     // 최신 reactions 재계산
-    const { data: rows, error: rErr } = await supabase.from("comment_reactions").select("user_id, emoji").eq("comment_id", commentId)
+    const { data: rows, error: rErr } = await supabase
+      .from("comment_reactions")
+      .select("user_id, emoji")
+      .eq("comment_id", commentId)
+
     if (rErr) {
       console.error("[reactions] list error:", rErr)
       return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
