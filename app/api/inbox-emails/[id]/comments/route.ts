@@ -88,8 +88,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (!isUuid(emailId)) return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
 
     const payload = await req.json().catch(() => null)
-    const text = (payload?.text ?? "").toString().trim()
-    if (!text) return NextResponse.json({ ok: false, error: "Bad Request" }, { status: 400 })
+    const text = (payload?.text ?? "").toString()
 
     const supabase = await createSupabaseServerClient()
 
@@ -100,46 +99,31 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     if (userError || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    const { data: owned, error: ownedError } = await supabase
-      .from("inbox_emails")
-      .select("id")
-      .eq("id", emailId)
-      .eq("user_id", user.id)
-      .maybeSingle()
+    // ✅ RPC: 소유권 체크 + insert + author_name resolve 까지 한번에
+    const { data, error } = await supabase.rpc("create_email_comment", {
+      p_email_id: emailId,
+      p_content: text,
+    })
 
-    if (ownedError) {
-      console.error("owned check error:", ownedError)
-      return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
-    }
-    if (!owned) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
-
-    const { data: created, error: createError } = await supabase
-      .from("comments")
-      .insert({ email_id: emailId, user_id: user.id, content: text })
-      .select("id,user_id,content,created_at")
-      .single()
-
-    if (createError || !created) {
-      console.error("comment insert error:", createError)
+    if (error) {
+      console.error("[comments rpc:create] error:", error)
+      // RPC에서 raise exception 시 500으로 오므로, 여기서 메시지를 매핑해도 됨(옵션)
       return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
     }
 
-    const { data: profile } = await supabase
-      .from("users")
-      .select("display_name,username")
-      .eq("id", user.id)
-      .maybeSingle()
+    const row = Array.isArray(data) ? data[0] : data
+    if (!row?.id) return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
 
     return NextResponse.json(
       {
         ok: true,
         comment: {
-          id: created.id,
-          authorName: profile?.display_name ?? profile?.username ?? "You",
-          authorAvatarColor: avatarColorFromUserId(user.id),
-          text: created.content ?? "",
-          createdAt: created.created_at,
-          reactions: [], // 새로 만든 댓글은 reactions 없음 (GET에서 즉시 집계됨)
+          id: row.id,
+          authorName: row.author_name ?? "You",
+          authorAvatarColor: avatarColorFromUserId(row.user_id),
+          text: row.content ?? "",
+          createdAt: row.created_at,
+          reactions: Array.isArray(row.reactions) ? row.reactions : [],
         },
       },
       { status: 200 }
