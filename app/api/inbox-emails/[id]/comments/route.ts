@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
-import crypto from "crypto"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -9,8 +8,12 @@ function isUuid(v: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
 }
 
-function avatarColorFromUserId(userId: string) {
-  return "#" + crypto.createHash("md5").update(userId).digest("hex").slice(0, 6)
+function avatarColorFromUserId(userId?: string | null) {
+  if (!userId) return "#64748b" // fallback
+  let hash = 0
+  for (let i = 0; i < userId.length; i++) hash = (hash * 31 + userId.charCodeAt(i)) >>> 0
+  const hue = hash % 360
+  return `hsl(${hue} 70% 45%)`
 }
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
