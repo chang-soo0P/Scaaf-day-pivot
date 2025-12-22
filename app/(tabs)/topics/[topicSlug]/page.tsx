@@ -240,33 +240,53 @@ function NewsletterCard({
   }
 }) {
   const href = emailDetailHref(newsletter.id)
-  return (
-    <Link href={href ?? "#"}>
-      <div className="flex gap-3 rounded-2xl bg-card p-3 shadow-sm ring-1 ring-border transition-shadow hover:shadow-md">
-        {/* Left side - text content */}
-        <div className="flex flex-1 min-w-0 flex-col justify-between">
-          {/* Source name */}
-          <span className="text-xs text-muted-foreground truncate mb-1">{newsletter.name}</span>
 
-          {/* Large bold subject/headline */}
-          <h3 className="text-base font-semibold leading-snug line-clamp-2 text-card-foreground">
-            {newsletter.subject}
-          </h3>
+  const CardInner = (
+    <div
+      className={cn(
+        "flex gap-3 rounded-2xl bg-card p-3 shadow-sm ring-1 ring-border transition-shadow hover:shadow-md",
+        href ? "cursor-pointer" : "cursor-not-allowed opacity-60"
+      )}
+      aria-disabled={!href}
+    >
+      {/* Left side - text content */}
+      <div className="flex flex-1 min-w-0 flex-col justify-between">
+        {/* Source name */}
+        <span className="text-xs text-muted-foreground truncate mb-1">{newsletter.name}</span>
 
-          {/* Topic chip and time */}
-          <div className="flex items-center gap-2 mt-2">
-            <span className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary">
-              {newsletter.topic}
-            </span>
-            <span className="text-xs text-muted-foreground">{newsletter.receivedTime}</span>
-          </div>
-        </div>
+        {/* Large bold subject/headline */}
+        <h3 className="text-base font-semibold leading-snug line-clamp-2 text-card-foreground">
+          {newsletter.subject}
+        </h3>
 
-        {/* Right side - thumbnail */}
-        <div className="relative h-20 w-24 flex-shrink-0 overflow-hidden rounded-xl bg-secondary">
-          <Image src={newsletter.thumbnail || "/placeholder.svg"} alt="" fill className="object-cover" />
+        {/* Topic chip and time */}
+        <div className="flex items-center gap-2 mt-2">
+          <span className="rounded-full bg-primary/10 px-2.5 py-1 text-xs font-semibold text-primary">
+            {newsletter.topic}
+          </span>
+          <span className="text-xs text-muted-foreground">{newsletter.receivedTime}</span>
         </div>
       </div>
+
+      {/* Right side - thumbnail */}
+      <div className="relative h-20 w-24 flex-shrink-0 overflow-hidden rounded-xl bg-secondary">
+        <Image src={newsletter.thumbnail || "/placeholder.svg"} alt="" fill className="object-cover" />
+      </div>
+    </div>
+  )
+
+  // ✅ href가 없으면 Link를 쓰지 않는다 (클릭 "안 되는" 상태를 명확히)
+  if (!href) {
+    return (
+      <div title="This is demo data. Connect a real email to open detail.">
+        {CardInner}
+      </div>
+    )
+  }
+
+  return (
+    <Link href={href} prefetch={false} className="block">
+      {CardInner}
     </Link>
   )
 }
@@ -349,4 +369,9 @@ export default async function TopicDetailPage({
       </Button>
     </div>
   )
+}
+
+// local helper for cn (so file is self-contained if cn isn't imported here already)
+function cn(...classes: (string | false | null | undefined)[]) {
+  return classes.filter(Boolean).join(" ")
 }
