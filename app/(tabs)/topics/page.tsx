@@ -1,16 +1,29 @@
 "use client"
 
 import type React from "react"
-
-import { useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import Image from "next/image"
 import { useRouter } from "next/navigation"
-import { emailDetailHref } from "@/lib/email-href"
 import { cn } from "@/lib/utils"
 import { MessageCircle, Megaphone, Grid3X3, LayoutList } from "lucide-react"
-import { getAllEmails, adItems, type Comment, type Reaction } from "@/lib/email-mock-data"
+import { adItems as mockAdItems, type Comment, type Reaction } from "@/lib/email-mock-data"
 
-// --- Types ---
+/** -----------------------------
+ * Types
+ * ------------------------------*/
+type DbEmailRow = {
+  id: string
+  from_address: string | null
+  subject: string | null
+  received_at: string | null
+  body_text: string | null
+  body_html: string | null
+}
+
+type ApiInboxEmailsListResponse =
+  | { ok: true; emails: DbEmailRow[] }
+  | { ok: false; error?: string }
+
 type TopicFeedItem = {
   id: string
   emailId: string
@@ -32,28 +45,73 @@ type AdItem = {
   thumbnail: string | null
 }
 
-function useFeedItems(): TopicFeedItem[] {
-  const emails = getAllEmails()
-  return emails.map((email) => {
-    const totalReactions = email.comments.reduce(
-      (sum, c) => sum + c.reactions.reduce((rSum, r) => rSum + r.count, 0),
-      0,
-    )
-    return {
-      id: `feed-${email.id}`,
-      emailId: email.id,
-      topic: email.topics[0] || "General",
-      newsletterTitle: email.newsletterTitle,
-      senderName: email.senderName,
-      comments: email.comments.slice(0, 2), // Show first 2 comments
-      totalComments: email.comments.length,
-      totalReactions,
-    }
-  })
+/** -----------------------------
+ * Helpers
+ * ------------------------------*/
+const isUuid = (v: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+
+async function safeReadJson<T>(res: Response): Promise<T> {
+  const text = await res.text()
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    return { ok: false, error: text || `HTTP ${res.status}` } as unknown as T
+  }
 }
 
-// --- Components ---
+function extractNameFromEmail(addr: string) {
+  const emailMatch = addr.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+  const email = emailMatch?.[0] ?? addr
+  const name = email.split("@")[0]
+  return name || email
+}
 
+// MVP 토픽 매칭(서버쪽 taxonomy 붙이면 교체)
+function topicFromEmail(e: DbEmailRow): string {
+  const hay = `${e.subject ?? ""} ${e.body_text ?? ""} ${e.body_html ?? ""}`.toLowerCase()
+
+  const has = (k: string) => hay.includes(k)
+
+  if (
+    has("openai") ||
+    has("gpt") ||
+    has("llm") ||
+    has("agent") ||
+    has("deepmind") ||
+    has("gemini") ||
+    has("anthropic") ||
+    has("claude") ||
+    has("nvidia") ||
+    has("inference")
+  )
+    return "AI"
+
+  if (has("fed") || has("rate") || has("inflation") || has("yield") || has("etf") || has("portfolio") || has("stocks"))
+    return "Investing"
+
+  if (has("kospi") || has("kosdaq") || has("samsung") || has("sk hynix") || has("won") || has("korea"))
+    return "Korea Stocks"
+
+  if (has("startup") || has("funding") || has("yc") || has("y combinator") || has("series a") || has("vc"))
+    return "Startups"
+
+  if (has("figma") || has("design") || has("ux") || has("ui") || has("accessibility") || has("wcag") || has("lottie"))
+    return "Design"
+
+  return "General"
+}
+
+function colorFromString(input: string) {
+  let hash = 0
+  for (let i = 0; i < input.length; i++) hash = (hash * 31 + input.charCodeAt(i)) >>> 0
+  const hue = hash % 360
+  return `hsl(${hue} 70% 45%)`
+}
+
+/** -----------------------------
+ * UI Components
+ * ------------------------------*/
 function TopicChip({ topic }: { topic: string }) {
   return (
     <span className="inline-block rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground">
@@ -108,12 +166,13 @@ function CommentBubble({ comment }: { comment: Comment }) {
 
 function FeedCardComponent({
   item,
-  layout,
   onOpenEmail,
-}: { item: TopicFeedItem; layout: string; onOpenEmail: () => void }) {
+}: {
+  item: TopicFeedItem
+  onOpenEmail: () => void
+}) {
   return (
     <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md">
-      {/* Header */}
       <div className="flex items-start justify-between gap-2 mb-3">
         <div className="min-w-0 flex-1">
           <TopicChip topic={item.topic} />
@@ -124,14 +183,12 @@ function FeedCardComponent({
         </div>
       </div>
 
-      {/* Comments */}
       <div className="space-y-3">
         {item.comments.map((comment) => (
           <CommentBubble key={comment.id} comment={comment} />
         ))}
       </div>
 
-      {/* Footer */}
       <div className="mt-3 flex items-center justify-between border-t border-border/50 pt-3">
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
           <span className="flex items-center gap-1">
@@ -140,6 +197,7 @@ function FeedCardComponent({
           </span>
           <span>{item.totalReactions} reactions</span>
         </div>
+
         <button onClick={onOpenEmail} className="text-xs font-medium text-primary hover:underline">
           Open email
         </button>
@@ -148,17 +206,23 @@ function FeedCardComponent({
   )
 }
 
-function AdCardComponent({ item, onOpenEmail }: { item: AdItem; onOpenEmail: () => void }) {
+function AdCardComponent({
+  item,
+  onOpenEmail,
+  disabled,
+}: {
+  item: AdItem
+  onOpenEmail: () => void
+  disabled?: boolean
+}) {
   return (
     <div className="rounded-2xl bg-card p-3 shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md">
       <div className="flex gap-3">
-        {/* Thumbnail */}
         {item.thumbnail && (
           <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-xl bg-secondary">
             <Image src={item.thumbnail || "/placeholder.svg"} alt={item.brand} fill className="object-cover" />
           </div>
         )}
-        {/* Content */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
             <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600 uppercase tracking-wide">
@@ -170,9 +234,14 @@ function AdCardComponent({ item, onOpenEmail }: { item: AdItem; onOpenEmail: () 
           <p className="text-xs text-muted-foreground line-clamp-2 mt-0.5">{item.headline}</p>
         </div>
       </div>
+
       <button
         onClick={onOpenEmail}
-        className="mt-2 w-full rounded-lg bg-secondary py-1.5 text-xs font-medium text-secondary-foreground transition-colors hover:bg-secondary/80"
+        disabled={disabled}
+        className={cn(
+          "mt-2 w-full rounded-lg bg-secondary py-1.5 text-xs font-medium text-secondary-foreground transition-colors hover:bg-secondary/80",
+          disabled && "opacity-50 cursor-not-allowed hover:bg-secondary"
+        )}
       >
         Open newsletter
       </button>
@@ -180,7 +249,9 @@ function AdCardComponent({ item, onOpenEmail }: { item: AdItem; onOpenEmail: () 
   )
 }
 
-// --- Main Page ---
+/** -----------------------------
+ * Layout helpers
+ * ------------------------------*/
 type TabType = "feed" | "ads"
 type LayoutMode = "list" | "grid"
 
@@ -194,11 +265,8 @@ function MasonryGrid({ children }: { children: React.ReactNode[] }) {
   const rightColumn: React.ReactNode[] = []
 
   children.forEach((child, index) => {
-    if (index % 2 === 0) {
-      leftColumn.push(child)
-    } else {
-      rightColumn.push(child)
-    }
+    if (index % 2 === 0) leftColumn.push(child)
+    else rightColumn.push(child)
   })
 
   return (
@@ -209,17 +277,82 @@ function MasonryGrid({ children }: { children: React.ReactNode[] }) {
   )
 }
 
+/** -----------------------------
+ * Page
+ * ------------------------------*/
 export default function TopicsPage() {
   const router = useRouter()
   const [activeTab, setActiveTab] = useState<TabType>("feed")
   const [layout, setLayout] = useState<LayoutMode>("list")
 
-  const feedItems = useFeedItems()
+  const [emails, setEmails] = useState<DbEmailRow[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
+      try {
+        setLoading(true)
+        const res = await fetch(`/api/inbox-emails?limit=200`, {
+          cache: "no-store",
+          credentials: "include",
+        })
+        const data = await safeReadJson<ApiInboxEmailsListResponse>(res)
+        if (cancelled) return
+
+        if (!data.ok) {
+          setEmails([])
+          setLoading(false)
+          return
+        }
+
+        setEmails(data.emails ?? [])
+        setLoading(false)
+      } catch {
+        if (cancelled) return
+        setEmails([])
+        setLoading(false)
+      }
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const feedItems: TopicFeedItem[] = useMemo(() => {
+    // MVP: 실제 메일만으로 feed 구성 (comments/reactions는 아직 friend feed 미구현 → 빈 값)
+    return (emails ?? []).map((e) => {
+      const from = e.from_address ?? "Unknown"
+      const senderName = extractNameFromEmail(from)
+      const title = (e.subject ?? "(no subject)").toString()
+      const topic = topicFromEmail(e)
+
+      const comments: Comment[] = [] // 친구 feed 붙일 때 여기에 채움
+      const totalComments = 0
+      const totalReactions = 0
+
+      return {
+        id: `feed-${e.id}`,
+        emailId: e.id,
+        topic,
+        newsletterTitle: title,
+        senderName,
+        comments,
+        totalComments,
+        totalReactions,
+      }
+    })
+  }, [emails])
+
+  // ads는 기존 mock 사용하되, emailId가 UUID가 아니면 open 막기
+  const adItems: AdItem[] = useMemo(() => {
+    return (mockAdItems ?? []) as any
+  }, [])
 
   const handleOpenEmail = (emailId: string) => {
-    const href = emailDetailHref(emailId)
-    if (!href) return
-    router.push(href)
+    if (!isUuid(emailId)) return
+    router.push(`/inbox/${emailId}`)
   }
 
   return (
@@ -233,7 +366,7 @@ export default function TopicsPage() {
               "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
               activeTab === "feed"
                 ? "bg-card text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
+                : "text-muted-foreground hover:text-foreground"
             )}
           >
             <MessageCircle className="h-4 w-4" />
@@ -243,7 +376,9 @@ export default function TopicsPage() {
             onClick={() => setActiveTab("ads")}
             className={cn(
               "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "ads" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              activeTab === "ads"
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
             )}
           >
             <Megaphone className="h-4 w-4" />
@@ -257,7 +392,10 @@ export default function TopicsPage() {
         {activeTab === "feed" ? (
           <>
             <div className="flex items-center justify-between mb-4">
-              <p className="text-sm text-muted-foreground">What your friends are saying</p>
+              <p className="text-sm text-muted-foreground">
+                {loading ? "Loading…" : "Your latest newsletters (MVP feed)"}
+              </p>
+
               <div className="flex items-center justify-end gap-1 rounded-lg bg-secondary/50 p-1 w-fit">
                 {(Object.keys(layoutIcons) as LayoutMode[]).map((mode) => {
                   const Icon = layoutIcons[mode]
@@ -269,7 +407,7 @@ export default function TopicsPage() {
                         "rounded-md p-2 transition-all",
                         layout === mode
                           ? "bg-primary text-primary-foreground"
-                          : "text-muted-foreground hover:text-foreground hover:bg-secondary",
+                          : "text-muted-foreground hover:text-foreground hover:bg-secondary"
                       )}
                       aria-label={`Switch to ${mode} layout`}
                     >
@@ -280,26 +418,26 @@ export default function TopicsPage() {
               </div>
             </div>
 
-            {layout === "list" && (
+            {!loading && feedItems.length === 0 ? (
+              <div className="rounded-2xl bg-card p-5 ring-1 ring-border text-sm text-muted-foreground">
+                No emails found.
+              </div>
+            ) : layout === "list" ? (
               <div className="space-y-4">
                 {feedItems.map((item) => (
                   <FeedCardComponent
                     key={item.id}
                     item={item}
-                    layout={layout}
                     onOpenEmail={() => handleOpenEmail(item.emailId)}
                   />
                 ))}
               </div>
-            )}
-
-            {layout === "grid" && (
+            ) : (
               <MasonryGrid>
                 {feedItems.map((item) => (
                   <FeedCardComponent
                     key={item.id}
                     item={item}
-                    layout={layout}
                     onOpenEmail={() => handleOpenEmail(item.emailId)}
                   />
                 ))}
@@ -310,6 +448,7 @@ export default function TopicsPage() {
           <>
             <div className="flex items-center justify-between mb-4">
               <p className="text-sm text-muted-foreground">Sponsored sections from your newsletters</p>
+
               <div className="flex items-center justify-end gap-1 rounded-lg bg-secondary/50 p-1 w-fit">
                 {(Object.keys(layoutIcons) as LayoutMode[]).map((mode) => {
                   const Icon = layoutIcons[mode]
@@ -321,7 +460,7 @@ export default function TopicsPage() {
                         "rounded-md p-2 transition-all",
                         layout === mode
                           ? "bg-primary text-primary-foreground"
-                          : "text-muted-foreground hover:text-foreground hover:bg-secondary",
+                          : "text-muted-foreground hover:text-foreground hover:bg-secondary"
                       )}
                       aria-label={`Switch to ${mode} layout`}
                     >
@@ -332,21 +471,33 @@ export default function TopicsPage() {
               </div>
             </div>
 
-            {layout === "list" && (
+            {layout === "list" ? (
               <div className="space-y-3">
                 {adItems.map((item) => (
-                  <AdCardComponent key={item.id} item={item} onOpenEmail={() => handleOpenEmail(item.emailId)} />
+                  <AdCardComponent
+                    key={item.id}
+                    item={item}
+                    disabled={!isUuid(item.emailId)}
+                    onOpenEmail={() => handleOpenEmail(item.emailId)}
+                  />
                 ))}
               </div>
-            )}
-
-            {layout === "grid" && (
+            ) : (
               <MasonryGrid>
                 {adItems.map((item) => (
-                  <AdCardComponent key={item.id} item={item} onOpenEmail={() => handleOpenEmail(item.emailId)} />
+                  <AdCardComponent
+                    key={item.id}
+                    item={item}
+                    disabled={!isUuid(item.emailId)}
+                    onOpenEmail={() => handleOpenEmail(item.emailId)}
+                  />
                 ))}
               </MasonryGrid>
             )}
+
+            <div className="mt-3 text-xs text-muted-foreground">
+              * MVP: Ad items are mock. “Open newsletter” works only if the item has a real UUID emailId.
+            </div>
           </>
         )}
       </div>
