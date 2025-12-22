@@ -9,7 +9,7 @@ function isUuid(v: string) {
 }
 
 function avatarColorFromUserId(userId?: string | null) {
-  if (!userId) return "#64748b" // fallback
+  if (!userId) return "#64748b"
   let hash = 0
   for (let i = 0; i < userId.length; i++) hash = (hash * 31 + userId.charCodeAt(i)) >>> 0
   const hue = hash % 360
@@ -44,6 +44,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     }
     if (!owned) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
 
+    // 댓글 목록
     const { data, error } = await supabase
       .from("comments")
       .select(
@@ -68,15 +69,14 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
       return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
     }
 
-    const comments =
-      (data ?? []).map((c: any) => ({
-        id: c.id,
-        authorName: c.users?.display_name ?? c.users?.username ?? "Unknown",
-        authorAvatarColor: avatarColorFromUserId(c.user_id),
-        text: c.content ?? "",
-        createdAt: c.created_at,
-        reactions: [],
-      })) ?? []
+    const comments = (data ?? []).map((c: any) => ({
+      id: c.id,
+      authorName: c.users?.display_name ?? c.users?.username ?? "Unknown",
+      authorAvatarColor: avatarColorFromUserId(c.user_id),
+      text: c.content ?? "",
+      createdAt: c.created_at,
+      reactions: [],
+    }))
 
     return NextResponse.json({ ok: true, comments }, { status: 200 })
   } catch (e) {
@@ -117,6 +117,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
     if (!owned) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
 
+    // 댓글 생성
     const { data: created, error: createError } = await supabase
       .from("comments")
       .insert({ email_id: emailId, user_id: user.id, content: text })
@@ -128,7 +129,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
     }
 
-    const { data: profile } = await supabase.from("users").select("display_name,username").eq("id", user.id).maybeSingle()
+    // 작성자 표시용 프로필(없어도 fallback)
+    const { data: profile } = await supabase
+      .from("users")
+      .select("display_name,username")
+      .eq("id", user.id)
+      .maybeSingle()
 
     return NextResponse.json(
       {
