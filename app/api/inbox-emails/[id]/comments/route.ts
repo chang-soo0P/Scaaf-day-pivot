@@ -16,6 +16,16 @@ function avatarColorFromUserId(userId?: string | null) {
   return `hsl(${hue} 70% 45%)`
 }
 
+type RpcRow = {
+  id: string
+  email_id: string
+  user_id: string
+  content: string | null
+  created_at: string
+  author_name: string | null
+  reactions: any // jsonb
+}
+
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id: emailId } = await params
@@ -30,7 +40,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
     if (userError || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    // 소유권 체크
+    // ✅ 소유권 체크는 DB 함수에서도 하지만, API 레벨에서도 404로 깔끔하게
     const { data: owned, error: ownedError } = await supabase
       .from("inbox_emails")
       .select("id")
@@ -44,38 +54,25 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     }
     if (!owned) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
 
-    // 댓글 목록
-    const { data, error } = await supabase
-      .from("comments")
-      .select(
-        `
-        id,
-        email_id,
-        user_id,
-        content,
-        created_at,
-        users:users (
-          id,
-          username,
-          display_name
-        )
-      `
-      )
-      .eq("email_id", emailId)
-      .order("created_at", { ascending: true })
+    // ✅ RPC: 댓글 + 리액션 집계 한번에
+    const { data, error } = await supabase.rpc("get_email_comments_with_reactions", {
+      p_email_id: emailId,
+    })
 
     if (error) {
-      console.error("comments select error:", error)
+      console.error("comments rpc error:", error)
       return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
     }
 
-    const comments = (data ?? []).map((c: any) => ({
-      id: c.id,
-      authorName: c.users?.display_name ?? c.users?.username ?? "Unknown",
-      authorAvatarColor: avatarColorFromUserId(c.user_id),
-      text: c.content ?? "",
-      createdAt: c.created_at,
-      reactions: [],
+    const rows = (data ?? []) as RpcRow[]
+
+    const comments = rows.map((r) => ({
+      id: r.id,
+      authorName: r.author_name ?? "Unknown",
+      authorAvatarColor: avatarColorFromUserId(r.user_id),
+      text: r.content ?? "",
+      createdAt: r.created_at,
+      reactions: Array.isArray(r.reactions) ? r.reactions : [],
     }))
 
     return NextResponse.json({ ok: true, comments }, { status: 200 })
@@ -103,7 +100,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     if (userError || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    // 소유권 체크
     const { data: owned, error: ownedError } = await supabase
       .from("inbox_emails")
       .select("id")
@@ -117,7 +113,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     }
     if (!owned) return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
 
-    // 댓글 생성
     const { data: created, error: createError } = await supabase
       .from("comments")
       .insert({ email_id: emailId, user_id: user.id, content: text })
@@ -129,7 +124,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       return NextResponse.json({ ok: false, error: "Internal error" }, { status: 500 })
     }
 
-    // 작성자 표시용 프로필(없어도 fallback)
     const { data: profile } = await supabase
       .from("users")
       .select("display_name,username")
@@ -145,7 +139,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           authorAvatarColor: avatarColorFromUserId(user.id),
           text: created.content ?? "",
           createdAt: created.created_at,
-          reactions: [],
+          reactions: [], // 새로 만든 댓글은 reactions 없음 (GET에서 즉시 집계됨)
         },
       },
       { status: 200 }
