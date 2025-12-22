@@ -24,7 +24,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
     const { data: email, error } = await supabase
       .from("inbox_emails")
-      .select("id,user_id,address_id,message_id,from_address,to_address,subject,body_text,body_html,raw,received_at")
+      .select("id,user_id,address_id,message_id,from_address,subject,body_text,body_html,raw,received_at")
       .eq("id", emailId)
       .eq("user_id", user.id)
       .maybeSingle()

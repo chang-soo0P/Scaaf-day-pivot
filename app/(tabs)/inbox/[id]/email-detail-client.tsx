@@ -30,6 +30,7 @@ type DbEmailRow = {
   address_id: string | null
   message_id: string | null
   from_address: string | null
+  // NOTE: DB에 없을 수 있어 optional 유지
   to_address?: string | null
   subject: string | null
   body_html: string | null
@@ -72,7 +73,10 @@ type ApiReactionToggleResponse =
 
 interface EmailDetailClientProps {
   emailId: string
-  serverData?: any
+  // ✅ 서버에서 내려줄 수 있는 초기 데이터(옵션)
+  initialEmail?: DbEmailRow | null
+  initialHighlights?: Highlight[]
+  initialComments?: Comment[]
 }
 
 /** -----------------------------
@@ -143,9 +147,7 @@ function mapDbEmailToView(db: DbEmailRow | null, emailId: string) {
   const subject = db.subject ?? "(no subject)"
 
   const bodyText =
-    (db.body_text && db.body_text.trim()) ||
-    (db.body_html && stripHtml(db.body_html)) ||
-    ""
+    (db.body_text && db.body_text.trim()) || (db.body_html && stripHtml(db.body_html)) || ""
 
   const { date, time } = formatHeaderDateTime(db.received_at)
 
@@ -190,41 +192,37 @@ function isValidEmailIdValue(v: string) {
   return Boolean(v && v !== "undefined" && v !== "null")
 }
 
-/** ✅ (A) UUID 유틸 추가 */
 const isUuid = (v: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
 
-/** tiny helper */
 function forceToggle(setter: (v: boolean | ((prev: boolean) => boolean)) => void) {
   setter((prev: boolean) => !prev)
 }
 
-export default function EmailDetailClient({ emailId, serverData }: EmailDetailClientProps) {
+export default function EmailDetailClient({
+  emailId,
+  initialEmail = null,
+  initialHighlights = [],
+  initialComments = [],
+}: EmailDetailClientProps) {
   const router = useRouter()
 
-  // ✅ early return 금지 → 대신 “유효성 플래그”로만 처리
-  // - 기본 값(undefined/null/"undefined")도 막고
-  // - mock id(nl-2 등)도 막기 위해 uuid까지 체크
   const isValidEmailId = isValidEmailIdValue(emailId) && isUuid(emailId)
 
   /** -----------------------------
    * DB email state
    * ------------------------------*/
-  const initialDbEmail: DbEmailRow | null = useMemo(() => {
-    if (serverData?.ok && serverData?.email) return serverData.email as DbEmailRow
-    return null
-  }, [serverData])
+  const [dbEmail, setDbEmail] = useState<DbEmailRow | null>(initialEmail)
+  const [loading, setLoading] = useState(!initialEmail && isValidEmailId)
+  const [error, setError] = useState<string | null>(null)
 
-  const [dbEmail, setDbEmail] = useState<DbEmailRow | null>(initialDbEmail)
-  const [loading, setLoading] = useState(!initialDbEmail)
-  const [error, setError] = useState<string | null>(serverData?.ok ? null : serverData?.error ?? null)
+  // ✅ StrictMode 2회 실행 방지 가드
+  const emailFetchedOnceRef = useRef(false)
 
-  /** ✅ (B) 단건 이메일 로드: UUID 아니면 fetch 자체를 절대 안 함 */
   useEffect(() => {
     let cancelled = false
 
     async function run() {
-      // ✅ invalid면 서버를 치지 않는다 (400 방지)
       if (!isValidEmailId) {
         setDbEmail(null)
         setLoading(false)
@@ -232,8 +230,16 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
         return
       }
 
-      // 이미 있으면 스킵
-      if (dbEmail) return
+      // ✅ 초기값이 있으면 첫 fetch 스킵
+      if (initialEmail) {
+        setLoading(false)
+        setError(null)
+        return
+      }
+
+      // ✅ StrictMode에서 첫 mount 2번 실행되는 것 방지
+      if (emailFetchedOnceRef.current) return
+      emailFetchedOnceRef.current = true
 
       try {
         setLoading(true)
@@ -260,13 +266,12 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
       }
     }
 
-    // 초기 데이터가 없을 때만 로드
-    if (!dbEmail) run()
+    run()
 
     return () => {
       cancelled = true
     }
-  }, [emailId, isValidEmailId, dbEmail])
+  }, [emailId, isValidEmailId, initialEmail])
 
   const email = useMemo(() => mapDbEmailToView(dbEmail, emailId), [dbEmail, emailId])
 
@@ -309,13 +314,19 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
   const [showShareModal, setShowShareModal] = useState(false)
   const [showCreateOptions, setShowCreateOptions] = useState(false)
 
-  const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(null)
+  const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(
+    null
+  )
 
-  const [highlights, setHighlights] = useState<Highlight[]>([])
-  const [comments, setComments] = useState<Comment[]>([])
+  const [highlights, setHighlights] = useState<Highlight[]>(initialHighlights)
+  const [comments, setComments] = useState<Comment[]>(initialComments)
   const [newComment, setNewComment] = useState("")
   const [highlightsLoading, setHighlightsLoading] = useState(false)
   const [commentsLoading, setCommentsLoading] = useState(false)
+
+  // ✅ StrictMode 방지 가드
+  const highlightsFetchedOnceRef = useRef(false)
+  const commentsFetchedOnceRef = useRef(false)
 
   /** highlights load */
   useEffect(() => {
@@ -324,6 +335,16 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
       setHighlightsLoading(false)
       return
     }
+
+    // ✅ 초기값이 있으면 첫 fetch 스킵
+    if (initialHighlights?.length) {
+      setHighlightsLoading(false)
+      return
+    }
+
+    // ✅ StrictMode 2회 실행 방지
+    if (highlightsFetchedOnceRef.current) return
+    highlightsFetchedOnceRef.current = true
 
     let cancelled = false
     async function load() {
@@ -354,7 +375,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     return () => {
       cancelled = true
     }
-  }, [emailId, isValidEmailId])
+  }, [emailId, isValidEmailId, initialHighlights])
 
   /** comments load */
   useEffect(() => {
@@ -363,6 +384,16 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
       setCommentsLoading(false)
       return
     }
+
+    // ✅ 초기값이 있으면 첫 fetch 스킵
+    if (initialComments?.length) {
+      setCommentsLoading(false)
+      return
+    }
+
+    // ✅ StrictMode 2회 실행 방지
+    if (commentsFetchedOnceRef.current) return
+    commentsFetchedOnceRef.current = true
 
     let cancelled = false
     async function load() {
@@ -393,7 +424,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
     return () => {
       cancelled = true
     }
-  }, [emailId, isValidEmailId])
+  }, [emailId, isValidEmailId, initialComments])
 
   /** text selection */
   const handleTextSelection = useCallback(() => {
@@ -534,7 +565,8 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
       const res = await fetch(`/api/inbox-emails/${emailId}/comments`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, authorName: "You", authorAvatarColor: "#3b82f6" }),
+        // ✅ 서버는 authorName/authorAvatarColor 저장 안 함 → 보내지 않음
+        body: JSON.stringify({ text }),
         credentials: "include",
       })
       const data = await safeReadJson<ApiCommentCreateResponse>(res)
@@ -593,7 +625,7 @@ export default function EmailDetailClient({ emailId, serverData }: EmailDetailCl
       const data = await safeReadJson<ApiReactionToggleResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to toggle reaction")
 
-      setComments((cur) => (cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c))))
+      setComments((cur) => cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c)))
     } catch {
       setComments(prev)
     }
