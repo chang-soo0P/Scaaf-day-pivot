@@ -146,8 +146,7 @@ function mapDbEmailToView(db: DbEmailRow | null, emailId: string) {
   const senderName = extractNameFromEmail(from)
   const subject = db.subject ?? "(no subject)"
 
-  const bodyText =
-    (db.body_text && db.body_text.trim()) || (db.body_html && stripHtml(db.body_html)) || ""
+  const bodyText = (db.body_text && db.body_text.trim()) || (db.body_html && stripHtml(db.body_html)) || ""
 
   const { date, time } = formatHeaderDateTime(db.received_at)
 
@@ -314,15 +313,40 @@ export default function EmailDetailClient({
   const [showShareModal, setShowShareModal] = useState(false)
   const [showCreateOptions, setShowCreateOptions] = useState(false)
 
-  const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(
-    null
-  )
+  const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(null)
 
   const [highlights, setHighlights] = useState<Highlight[]>(initialHighlights)
   const [comments, setComments] = useState<Comment[]>(initialComments)
   const [newComment, setNewComment] = useState("")
   const [highlightsLoading, setHighlightsLoading] = useState(false)
   const [commentsLoading, setCommentsLoading] = useState(false)
+
+  // ✅ (NEW) reaction picker: hover 대신 click 토글
+  const [openReactionFor, setOpenReactionFor] = useState<string | null>(null)
+  const reactionPopoverRef = useRef<HTMLDivElement | null>(null)
+
+  // 바깥 클릭/ESC로 닫기
+  useEffect(() => {
+    function onPointerDown(e: MouseEvent | TouchEvent) {
+      if (!openReactionFor) return
+      const target = e.target as Node | null
+      const pop = reactionPopoverRef.current
+      if (pop && target && pop.contains(target)) return
+      setOpenReactionFor(null)
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpenReactionFor(null)
+    }
+
+    document.addEventListener("mousedown", onPointerDown)
+    document.addEventListener("touchstart", onPointerDown, { passive: true })
+    document.addEventListener("keydown", onKeyDown)
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown)
+      document.removeEventListener("touchstart", onPointerDown as any)
+      document.removeEventListener("keydown", onKeyDown)
+    }
+  }, [openReactionFor])
 
   // ✅ StrictMode 방지 가드
   const highlightsFetchedOnceRef = useRef(false)
@@ -625,7 +649,9 @@ export default function EmailDetailClient({
       const data = await safeReadJson<ApiReactionToggleResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to toggle reaction")
 
-      setComments((cur) => cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c)))
+      setComments((cur) =>
+        cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c))
+      )
     } catch {
       setComments(prev)
     }
@@ -871,22 +897,37 @@ export default function EmailDetailClient({
                           </button>
                         ))}
 
-                        <div className="relative group">
-                          <button className="flex items-center justify-center h-6 w-6 rounded-full bg-secondary text-muted-foreground hover:bg-secondary/80">
+                        {/* ✅ Reaction picker: click to open */}
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() => setOpenReactionFor((cur) => (cur === comment.id ? null : comment.id))}
+                            className="flex items-center justify-center h-6 w-6 rounded-full bg-secondary text-muted-foreground hover:bg-secondary/80"
+                            aria-label="Add reaction"
+                          >
                             <Plus className="h-3 w-3" />
                           </button>
 
-                          <div className="absolute bottom-full left-0 mb-1 hidden group-hover:flex bg-card rounded-lg shadow-lg ring-1 ring-border p-1 gap-1 z-10">
-                            {availableEmojis.map((emoji) => (
-                              <button
-                                key={emoji}
-                                onClick={() => toggleReaction(comment.id, emoji)}
-                                className="h-7 w-7 rounded hover:bg-secondary flex items-center justify-center text-sm"
-                              >
-                                {emoji}
-                              </button>
-                            ))}
-                          </div>
+                          {openReactionFor === comment.id && (
+                            <div
+                              ref={reactionPopoverRef}
+                              className="absolute bottom-full left-0 mb-1 flex bg-card rounded-lg shadow-lg ring-1 ring-border p-1 gap-1 z-10"
+                            >
+                              {availableEmojis.map((emoji) => (
+                                <button
+                                  key={emoji}
+                                  type="button"
+                                  onClick={async () => {
+                                    await toggleReaction(comment.id, emoji)
+                                    setOpenReactionFor(null)
+                                  }}
+                                  className="h-7 w-7 rounded hover:bg-secondary flex items-center justify-center text-sm"
+                                >
+                                  {emoji}
+                                </button>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
