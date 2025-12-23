@@ -1,8 +1,8 @@
 import { cookies } from "next/headers"
 import { createServerClient } from "@supabase/ssr"
 
-export function supabaseRouteClient() {
-  const cookieStore = cookies()
+export async function createSupabaseRouteClient() {
+  const cookieStore = await cookies()
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -15,9 +15,13 @@ export function supabaseRouteClient() {
       },
       setAll(cookiesToSet) {
         cookiesToSet.forEach(({ name, value, options }) => {
+          // Next cookies() API
           cookieStore.set(name, value, options)
         })
       },
     },
   })
 }
+
+// (옵션) 기존 이름도 유지하고 싶으면 alias 제공
+export const supabaseRouteClient = createSupabaseRouteClient

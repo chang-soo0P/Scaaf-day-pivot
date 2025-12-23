@@ -71,6 +71,19 @@ type ApiReactionToggleResponse =
   | { ok: true; reactions: Comment["reactions"] }
   | { ok: false; error?: string }
 
+// ✅ circles
+type Circle = {
+  id: string
+  name?: string | null
+  created_at?: string | null
+}
+type ApiCirclesListResponse = { ok: true; circles: Circle[] } | { ok: false; error?: string }
+
+// ✅ share target(모달이 “이메일 공유”인지 “하이라이트 공유”인지 구분)
+type ShareTarget =
+  | { type: "email" }
+  | { type: "highlight"; highlightId?: string; quote: string }
+
 interface EmailDetailClientProps {
   emailId: string
   // ✅ 서버에서 내려줄 수 있는 초기 데이터(옵션)
@@ -310,16 +323,25 @@ export default function EmailDetailClient({
   const [showMoreSummary, setShowMoreSummary] = useState(false)
   const [selectedText, setSelectedText] = useState("")
   const [selectionPosition, setSelectionPosition] = useState<{ x: number; y: number } | null>(null)
+
   const [showShareModal, setShowShareModal] = useState(false)
   const [showCreateOptions, setShowCreateOptions] = useState(false)
 
+  // ✅ 기존 highlightToShare 유지하되, "이메일 공유"도 지원하기 위해 shareTarget을 추가
   const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(null)
+  const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null)
 
   const [highlights, setHighlights] = useState<Highlight[]>(initialHighlights)
   const [comments, setComments] = useState<Comment[]>(initialComments)
   const [newComment, setNewComment] = useState("")
   const [highlightsLoading, setHighlightsLoading] = useState(false)
   const [commentsLoading, setCommentsLoading] = useState(false)
+
+  // ✅ circles for share modal
+  const [circles, setCircles] = useState<Circle[]>([])
+  const [circlesLoading, setCirclesLoading] = useState(false)
+  const [circlesError, setCirclesError] = useState<string | null>(null)
+  const [sharing, setSharing] = useState(false)
 
   // ✅ (NEW) reaction picker: hover 대신 click 토글
   const [openReactionFor, setOpenReactionFor] = useState<string | null>(null)
@@ -351,6 +373,73 @@ export default function EmailDetailClient({
   // ✅ StrictMode 방지 가드
   const highlightsFetchedOnceRef = useRef(false)
   const commentsFetchedOnceRef = useRef(false)
+
+  /** -----------------------------
+   * circles load (when share modal opens)
+   * ------------------------------*/
+  useEffect(() => {
+    if (!showShareModal) return
+
+    let cancelled = false
+    async function loadCircles() {
+      try {
+        setCirclesLoading(true)
+        setCirclesError(null)
+
+        const res = await fetch("/api/circles?limit=50", {
+          cache: "no-store",
+          credentials: "include",
+        })
+        const data = await safeReadJson<ApiCirclesListResponse>(res)
+        if (cancelled) return
+
+        if (!data.ok) {
+          setCircles([])
+          setCirclesError(data.error ?? "Failed to load circles")
+          setCirclesLoading(false)
+          return
+        }
+
+        setCircles(data.circles ?? [])
+        setCirclesLoading(false)
+      } catch (e: any) {
+        if (cancelled) return
+        setCircles([])
+        setCirclesError(e?.message ?? "Failed to load circles")
+        setCirclesLoading(false)
+      }
+    }
+
+    loadCircles()
+    return () => {
+      cancelled = true
+    }
+  }, [showShareModal])
+
+  /** -----------------------------
+   * share helpers
+   * ------------------------------*/
+  async function shareEmailToCircle(circleId: string) {
+    if (!isValidEmailId) return { ok: false as const, error: "Invalid email id" }
+
+    setSharing(true)
+    try {
+      const res = await fetch("/api/circles/share", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ circleId, emailId }),
+        credentials: "include",
+      })
+      const data = await safeReadJson<{ ok: true; duplicated?: boolean } | { ok: false; error?: string }>(res)
+
+      if (!res.ok || !data.ok) {
+        return { ok: false as const, error: (data as any)?.error ?? `HTTP ${res.status}` }
+      }
+      return data
+    } finally {
+      setSharing(false)
+    }
+  }
 
   /** highlights load */
   useEffect(() => {
@@ -553,9 +642,11 @@ export default function EmailDetailClient({
     window.getSelection()?.removeAllRanges()
   }
 
+  // ✅ 선택된 텍스트 “Share” = 하이라이트 공유 모드로 모달 오픈
   const handleShare = () => {
     if (!selectedText) return
     setHighlightToShare({ quote: selectedText })
+    setShareTarget({ type: "highlight", quote: selectedText })
     setShowShareModal(true)
     setSelectedText("")
     setSelectionPosition(null)
@@ -564,6 +655,7 @@ export default function EmailDetailClient({
 
   const handleShareHighlight = (h: Highlight) => {
     setHighlightToShare({ id: h.id, quote: h.quote })
+    setShareTarget({ type: "highlight", highlightId: h.id, quote: h.quote })
     setShowShareModal(true)
   }
 
@@ -998,38 +1090,66 @@ export default function EmailDetailClient({
                 </button>
               </div>
 
-              {highlightToShare?.quote && (
+              {/* preview */}
+              {shareTarget?.type === "highlight" && highlightToShare?.quote ? (
                 <div className="mb-4 rounded-xl bg-yellow-500/10 p-3 border-l-2 border-yellow-500">
                   <p className="text-sm italic">"{highlightToShare.quote}"</p>
                 </div>
+              ) : (
+                <div className="mb-4 rounded-xl bg-secondary/40 p-3">
+                  <p className="text-xs text-muted-foreground mb-1">Sharing this email</p>
+                  <p className="text-sm font-medium">{email.subject}</p>
+                </div>
               )}
 
-              <div className="space-y-2">
-                {["Tech Enthusiasts", "Investment Club", "News Junkies"].map((circle) => (
-                  <button
-                    key={circle}
-                    onClick={async () => {
-                      if (!highlightToShare?.quote) {
+              {/* circles list */}
+              {circlesLoading ? (
+                <div className="py-6 text-sm text-muted-foreground">Loading circles…</div>
+              ) : circlesError ? (
+                <div className="py-4 text-sm text-destructive">{circlesError}</div>
+              ) : circles.length === 0 ? (
+                <div className="py-4 text-sm text-muted-foreground">
+                  No circles yet. Create or join a circle first.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {circles.map((c) => (
+                    <button
+                      key={c.id}
+                      disabled={sharing}
+                      onClick={async () => {
+                        // 1) 이메일을 feed로 공유 (circle_emails insert)
+                        const r = await shareEmailToCircle(c.id)
+                        if (!r.ok) {
+                          alert(r.error ?? "Share failed")
+                          return
+                        }
+
+                        // 2) 하이라이트 공유 모드면 기존 기능도 유지
+                        if (shareTarget?.type === "highlight" && highlightToShare?.quote) {
+                          if (!highlightToShare.id) {
+                            const created = await createHighlight(highlightToShare.quote)
+                            if (created) await markHighlightShared(created.id)
+                          } else {
+                            await markHighlightShared(highlightToShare.id)
+                          }
+                        }
+
                         setShowShareModal(false)
-                        return
-                      }
-
-                      if (!highlightToShare.id) {
-                        const created = await createHighlight(highlightToShare.quote)
-                        if (created) await markHighlightShared(created.id)
-                      } else {
-                        await markHighlightShared(highlightToShare.id)
-                      }
-
-                      setShowShareModal(false)
-                      setHighlightToShare(null)
-                    }}
-                    className="w-full rounded-xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80"
-                  >
-                    {circle}
-                  </button>
-                ))}
-              </div>
+                        setHighlightToShare(null)
+                        setShareTarget(null)
+                        router.refresh()
+                      }}
+                      className={cn(
+                        "w-full rounded-xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80",
+                        sharing && "opacity-60 cursor-not-allowed"
+                      )}
+                    >
+                      {c.name ?? `Circle ${c.id.slice(0, 6)}`}
+                    </button>
+                  ))}
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}
@@ -1118,8 +1238,14 @@ export default function EmailDetailClient({
           >
             <Plus className="h-4 w-4" />
           </button>
+
+          {/* ✅ 헤더 Share 버튼: 이메일 공유 모드 */}
           <button
-            onClick={() => setShowShareModal(true)}
+            onClick={() => {
+              setShareTarget({ type: "email" })
+              setHighlightToShare(null)
+              setShowShareModal(true)
+            }}
             className="rounded-full bg-secondary p-2 text-secondary-foreground hover:bg-secondary/80"
             aria-label="Share"
           >
