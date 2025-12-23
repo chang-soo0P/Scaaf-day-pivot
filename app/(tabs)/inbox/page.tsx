@@ -1,1002 +1,393 @@
 "use client"
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import type React from "react"
+import { useEffect, useMemo, useRef, useState, useCallback } from "react"
 import { useRouter } from "next/navigation"
-import { cn } from "@/lib/utils"
 import { emailDetailHref } from "@/lib/email-href"
-import {
-  ChevronLeft,
-  Hash,
-  Highlighter,
-  MessageCircle,
-  Grid3X3,
-  LayoutList,
-  Layers,
-  Share2,
-  Sparkles,
-  CalendarDays,
-  Target,
-  ChevronRight,
-  Mail,
-} from "lucide-react"
-import { motion, AnimatePresence, LayoutGroup } from "framer-motion"
-import { ShineBorder } from "@/components/ui/shine-border"
-import { useDailyMissionStore } from "@/lib/daily-mission-store"
-import { useToast } from "@/hooks/use-toast"
+import { cn } from "@/lib/utils"
+import { MessageCircle, Megaphone, Grid3X3, LayoutList } from "lucide-react"
 
 // --- Types ---
-type TabType = "byTopics" | "all"
-type LayoutMode = "stack" | "grid" | "list"
-
-type EmailReaction = { emoji: string; count: number }
-type EmailComment = { reactions?: EmailReaction[] }
-
-type Email = {
+type Reaction = { emoji: string; count: number }
+type Comment = {
   id: string
-  senderName: string
+  authorId?: string
+  authorName: string
+  authorAvatarColor?: string
+  text: string
+  createdAt: string
+  totalReactions?: number
+  reactions?: Reaction[]
+}
+
+type TopicFeedItem = {
+  id: string
+  emailId: string
+  circleId: string
+  circleName: string
+  topic: string
   newsletterTitle: string
-  snippet: string
-  receivedAt: string
-  receivedAtIso?: string | null
-  issueImageEmoji?: string | null
-  hasAdSegment?: boolean
-  topics: string[]
-  highlights: any[]
-  comments: EmailComment[]
+  senderName: string
+  comments: Comment[]
+  totalComments: number
+  totalReactions: number
+  sharedAt?: string
 }
 
-type TopicInfo = {
-  id: string
-  name: string
-  summary: string
-  keyPoints: string[]
-  newsletterCount: number
-  newCommentsToday: number
-  newHighlightsToday: number
-}
-
-type InboxEmailRow = {
-  id: string
-  from_address: string | null
+type FeedApiRow = {
+  circle_id: string
+  circle_name: string
+  email_id: string
+  shared_at: string
   subject: string | null
-  body_text: string | null
-  body_html: string | null
-  received_at: string | null
-  message_id: string | null
-  address_id: string | null
-  raw: any
+  from_address: string | null
+  latest_comments: any // jsonb
+  total_comments: number
+  total_reactions: number
 }
 
-const EMPTY_COMMENTS: EmailComment[] = []
-const EMPTY_HIGHLIGHTS: any[] = []
+type ApiFeedResponse =
+  | { ok: true; items: FeedApiRow[]; nextCursor?: string | null }
+  | { ok: false; error?: string }
 
-// --- helpers ---
-function safeDomain(from: string) {
-  const email = (from.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? "").toLowerCase()
-  const domain = email.split("@")[1] ?? ""
-  return domain || "unknown"
-}
-
-function formatTime(iso: string | null) {
-  if (!iso) return ""
+// --- Helpers ---
+async function safeReadJson<T>(res: Response): Promise<T> {
+  const text = await res.text()
   try {
-    return new Date(iso).toLocaleString()
+    return JSON.parse(text) as T
   } catch {
-    return iso
+    return { ok: false, error: text || `HTTP ${res.status}` } as unknown as T
   }
 }
 
-function makeSnippet(text: string | null) {
-  const t = (text ?? "").replace(/\s+/g, " ").trim()
-  return t.length > 140 ? `${t.slice(0, 140)}…` : t
+function extractNameFromEmail(addr: string) {
+  const emailMatch = addr.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+  const email = emailMatch?.[0] ?? addr
+  const name = email.split("@")[0]
+  return name || email
 }
 
-const topicEmojiPool = ["🧠", "📈", "🛠️", "📰", "🧪", "🚀", "💡", "🎯", "🌿", "🔮"]
-function emojiForKey(key: string) {
-  let h = 0
-  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0
-  return topicEmojiPool[h % topicEmojiPool.length]
-}
-function toTopicId(name: string) {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "")
-}
-
-// --- fetch hook (5s polling + dedupe + visibility guard + abort overlap) ---
-function useInboxEmails(limit = 200, pollMs = 5000) {
-  const [rows, setRows] = useState<InboxEmailRow[]>([])
-  const [loading, setLoading] = useState(true)
-  const [lastSeenAt, setLastSeenAt] = useState<string | null>(null)
-  const [newCount, setNewCount] = useState(0)
-
-  const pendingToastKeyRef = useRef<string | null>(null)
-  const inFlightRef = useRef<AbortController | null>(null)
-  const initialLoadedRef = useRef(false)
-
-  async function fetchOnce(isInitial = false) {
-    if (typeof document !== "undefined" && document.visibilityState === "hidden") return
-
-    if (inFlightRef.current) inFlightRef.current.abort()
-    const ac = new AbortController()
-    inFlightRef.current = ac
-
-    const res = await fetch(`/api/inbox-emails?limit=${limit}`, {
-      cache: "no-store",
-      signal: ac.signal,
-    }).catch((e) => {
-      if (String((e as any)?.name) === "AbortError") return null
-      throw e
-    })
-
-    if (!res) return
-    const json = await res.json()
-
-    if (!res.ok) {
-      console.error("Failed to load inbox emails:", json)
-      if (isInitial) {
-        setRows([])
-        setNewCount(0)
-      }
-      return
-    }
-
-    const nextRows: InboxEmailRow[] = json.emails ?? []
-    setRows(nextRows)
-
-    const top = nextRows[0]
-    const topKey = top ? `${top.id}:${top.received_at ?? ""}` : null
-
-    if (!initialLoadedRef.current) {
-      initialLoadedRef.current = true
-      const topAt = top?.received_at ?? null
-      if (topAt) setLastSeenAt(topAt)
-      setNewCount(0)
-      pendingToastKeyRef.current = null
-      return
-    }
-
-    if (!lastSeenAt) {
-      const topAt = top?.received_at ?? null
-      if (topAt) setLastSeenAt(topAt)
-      setNewCount(0)
-      pendingToastKeyRef.current = null
-      return
-    }
-
-    const lastSeenMs = new Date(lastSeenAt).getTime()
-    const cnt = nextRows.filter((r) => {
-      if (!r.received_at) return false
-      return new Date(r.received_at).getTime() > lastSeenMs
-    }).length
-
-    setNewCount(cnt)
-    if (cnt > 0 && topKey) pendingToastKeyRef.current = topKey
-  }
-
-  useEffect(() => {
-    let alive = true
-
-    ;(async () => {
-      try {
-        setLoading(true)
-        await fetchOnce(true)
-      } finally {
-        if (alive) setLoading(false)
-      }
-    })()
-
-    const t = setInterval(() => {
-      fetchOnce(false).catch(console.error)
-    }, pollMs)
-
-    return () => {
-      alive = false
-      clearInterval(t)
-      if (inFlightRef.current) inFlightRef.current.abort()
-      inFlightRef.current = null
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [limit, pollMs])
-
-  const markSeenNow = () => {
-    const top = rows[0]?.received_at ?? null
-    if (top) setLastSeenAt(top)
-    setNewCount(0)
-    pendingToastKeyRef.current = null
-  }
-
-  return { rows, loading, newCount, lastSeenAt, markSeenNow, pendingToastKeyRef }
-}
-
-// --- derive UI data from inbox_emails ---
-function rowsToUiEmails(rows: InboxEmailRow[]): Email[] {
-  return rows.map((r) => {
-    const from = r.from_address ?? "Unknown"
-    const domain = safeDomain(from)
-    const topic = domain === "unknown" ? "Other" : domain
-    const title = r.subject ?? "(no subject)"
-    const snippet = makeSnippet(r.body_text ?? null)
-
-    return {
-      id: r.id,
-      senderName: from,
-      newsletterTitle: title,
-      snippet,
-      receivedAt: formatTime(r.received_at),
-      receivedAtIso: r.received_at,
-      issueImageEmoji: emojiForKey(domain),
-      hasAdSegment: false,
-      topics: [topic],
-      highlights: EMPTY_HIGHLIGHTS,
-      comments: EMPTY_COMMENTS,
-    }
-  })
-}
-
-function buildTopics(emails: Email[]): TopicInfo[] {
-  const map = new Map<string, Email[]>()
-  emails.forEach((e) => {
-    const t = e.topics[0] ?? "Other"
-    if (!map.has(t)) map.set(t, [])
-    map.get(t)!.push(e)
-  })
-
-  const topics: TopicInfo[] = []
-  for (const [name, list] of map.entries()) {
-    const id = toTopicId(name)
-    const latestSubjects = list
-      .slice(0, 5)
-      .map((x) => x.newsletterTitle)
-      .filter(Boolean)
-
-    topics.push({
-      id,
-      name,
-      newsletterCount: list.length,
-      newCommentsToday: 0,
-      newHighlightsToday: 0,
-      summary: `Auto topic generated from sender domain (${name}). ${list.length} newsletters currently.`,
-      keyPoints: latestSubjects.length ? latestSubjects : ["No subjects yet"],
-    })
-  }
-
-  topics.sort((a, b) => b.newsletterCount - a.newsletterCount)
-  return topics
-}
-
-function filterEmailsByTopicId(emails: Email[], topicId: string) {
-  return emails.filter((e) => toTopicId(e.topics[0] ?? "other") === topicId)
-}
-
-// --- Layout Icons ---
-const layoutIcons = {
-  stack: Layers,
-  grid: Grid3X3,
-  list: LayoutList,
+function avatarColorFromUserId(userId?: string | null) {
+  if (!userId) return "#64748b"
+  let hash = 0
+  for (let i = 0; i < userId.length; i++) hash = (hash * 31 + userId.charCodeAt(i)) >>> 0
+  const hue = hash % 360
+  return `hsl(${hue} 70% 45%)`
 }
 
 // --- Components ---
-function IssueCard({
-  email,
-  onClick,
-  isDragging,
-}: {
-  email: Email
-  onClick: () => void
-  isDragging?: boolean
-}) {
-  const stats = {
-    highlightCount: email.highlights.length,
-    commentCount: email.comments.length,
-  }
+function TopicChip({ topic }: { topic: string }) {
+  return (
+    <span className="inline-block rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground">
+      {topic}
+    </span>
+  )
+}
 
-  // ✅ TS 추론 꼬임(never) 방지: tuple로 계산 + 인덱스 접근만 사용
-  const topReaction = useMemo(() => {
-    const counts: Record<string, number> = {}
-    email.comments.forEach((comment) => {
-      ;(comment.reactions ?? []).forEach((r) => {
-        counts[r.emoji] = (counts[r.emoji] ?? 0) + r.count
-      })
-    })
-
-    let best: [string, number] | null = null
-    for (const [emoji, count] of Object.entries(counts)) {
-      if (!best || count > best[1]) best = [emoji, count]
-    }
-    return best
-  }, [email.comments])
-
+function Avatar({ name, color }: { name: string; color: string }) {
   return (
     <div
-      onClick={() => {
-        if (!isDragging) onClick()
-      }}
-      className="flex items-center gap-3 rounded-2xl bg-card p-3 shadow-sm ring-1 ring-border/60 cursor-pointer hover:shadow-md transition-shadow"
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white"
+      style={{ backgroundColor: color }}
     >
+      {name.charAt(0).toUpperCase()}
+    </div>
+  )
+}
+
+function CommentBubble({ comment }: { comment: Comment }) {
+  return (
+    <div className="flex gap-2">
+      <Avatar name={comment.authorName} color={comment.authorAvatarColor ?? "#64748b"} />
       <div className="flex-1 min-w-0">
-        <p className="text-xs text-muted-foreground mb-0.5">{email.senderName}</p>
-        <h4 className="text-sm font-semibold text-foreground leading-snug line-clamp-2 mb-1">
-          {email.newsletterTitle}
-        </h4>
-        <p className="text-xs text-muted-foreground line-clamp-2 mb-2">{email.snippet}</p>
-
-        <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-          {stats.highlightCount > 0 && (
-            <span className="flex items-center gap-0.5">
-              <Highlighter className="h-3 w-3" />
-              {stats.highlightCount}
-            </span>
-          )}
-          {stats.commentCount > 0 && (
-            <span className="flex items-center gap-0.5">
-              <MessageCircle className="h-3 w-3" />
-              {stats.commentCount}
-            </span>
-          )}
-          {topReaction && (
-            <span className="flex items-center gap-0.5">
-              {topReaction[0]} {topReaction[1]}
-            </span>
-          )}
+        <div className="rounded-2xl rounded-tl-sm bg-secondary/60 px-3 py-2">
+          <div className="flex items-center gap-2 mb-0.5">
+            <span className="text-xs font-semibold text-foreground">{comment.authorName}</span>
+            <span className="text-[10px] text-muted-foreground">{new Date(comment.createdAt).toLocaleString()}</span>
+          </div>
+          <p className="text-sm text-foreground/90 leading-relaxed">{comment.text}</p>
         </div>
+        {(comment.totalReactions ?? 0) > 0 && (
+          <div className="mt-1 ml-1 text-[10px] text-muted-foreground">
+            {comment.totalReactions} reactions
+          </div>
+        )}
       </div>
-
-      {email.issueImageEmoji && (
-        <div className="relative h-16 w-16 shrink-0 rounded-xl bg-gradient-to-br from-secondary to-secondary/50 flex items-center justify-center">
-          <span className="text-2xl">{email.issueImageEmoji}</span>
-        </div>
-      )}
     </div>
   )
 }
 
-function NewsletterCard({ email, glowNew }: { email: Email; glowNew?: boolean }) {
-  const router = useRouter()
-
-  const stats = {
-    highlightCount: email.highlights.length,
-    commentCount: email.comments.length,
-  }
-
-  // ✅ 여기도 동일 방식으로 안전하게
-  const topEmoji = useMemo(() => {
-    const counts: Record<string, number> = {}
-    email.comments.forEach((comment) => {
-      ;(comment.reactions ?? []).forEach((r) => {
-        counts[r.emoji] = (counts[r.emoji] ?? 0) + r.count
-      })
-    })
-
-    let best: [string, number] | null = null
-    for (const [emoji, count] of Object.entries(counts)) {
-      if (!best || count > best[1]) best = [emoji, count]
-    }
-    return best ? best[0] : null
-  }, [email.comments])
-
-  const href = emailDetailHref(email.id)
-
+function FeedCardComponent({
+  item,
+  onOpenEmail,
+}: { item: TopicFeedItem; onOpenEmail: () => void }) {
   return (
-    <div
-      onClick={() => {
-        if (href) router.push(href)
-      }}
-      className={cn(
-        "rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 transition-all duration-500 hover:shadow-md",
-        glowNew && "ring-2 ring-primary/35 bg-primary/5 shadow-md",
-        !href && "opacity-60 cursor-not-allowed",
-      )}
-      role="button"
-      tabIndex={0}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          <p className="text-xs font-medium text-muted-foreground">{email.senderName}</p>
-          <h3 className="mt-1 text-sm font-semibold text-foreground line-clamp-2">{email.newsletterTitle}</h3>
-
-          <div className="mt-1.5 flex flex-wrap gap-1">
-            {email.topics.map((topic) => (
-              <span
-                key={topic}
-                className="inline-block rounded-full bg-secondary px-2 py-0.5 text-[10px] font-medium text-secondary-foreground"
-              >
-                {topic}
+    <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md">
+      <div className="flex items-start justify-between gap-2 mb-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <TopicChip topic={item.topic} />
+            <span className="text-xs text-muted-foreground">in {item.circleName}</span>
+            {item.sharedAt ? (
+              <span className="ml-auto text-[10px] text-muted-foreground">
+                {new Date(item.sharedAt).toLocaleString()}
               </span>
-            ))}
+            ) : null}
           </div>
-
-          <p className="mt-2 text-xs text-muted-foreground line-clamp-2">{email.snippet}</p>
+          <h3 className="mt-2 text-base font-semibold leading-snug text-foreground line-clamp-2">
+            {item.newsletterTitle}
+          </h3>
+          <p className="mt-0.5 text-xs text-muted-foreground">from {item.senderName}</p>
         </div>
-
-        {email.issueImageEmoji && (
-          <div className="relative h-14 w-14 shrink-0 rounded-xl bg-gradient-to-br from-secondary to-secondary/50 flex items-center justify-center">
-            <span className="text-xl">{email.issueImageEmoji}</span>
-          </div>
-        )}
       </div>
 
-      <div className="mt-3 flex items-center gap-3 text-[10px] text-muted-foreground">
-        <span>{email.receivedAt}</span>
-
-        {glowNew && (
-          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">NEW</span>
-        )}
-
-        {stats.highlightCount > 0 && (
-          <span className="flex items-center gap-0.5">
-            <Highlighter className="h-3 w-3" /> {stats.highlightCount}
-          </span>
-        )}
-        {stats.commentCount > 0 && (
-          <span className="flex items-center gap-0.5">
-            <MessageCircle className="h-3 w-3" /> {stats.commentCount}
-          </span>
-        )}
-        {topEmoji && <span>{topEmoji}</span>}
-        {email.hasAdSegment && (
-          <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">Ad</span>
-        )}
+      <div className="space-y-3">
+        {item.comments.map((comment) => (
+          <CommentBubble key={comment.id} comment={comment} />
+        ))}
       </div>
-    </div>
-  )
-}
 
-function TopicDetailView({ topic, emails, onBack }: { topic: TopicInfo; emails: Email[]; onBack: () => void }) {
-  const router = useRouter()
-
-  return (
-    <div className="flex flex-col min-h-full">
-      <div className="sticky top-0 z-10 bg-background pt-4 pb-2 px-4">
-        <button onClick={onBack} className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-          <ChevronLeft className="h-4 w-4" />
-          Back to topics
+      <div className="mt-3 flex items-center justify-between border-t border-border/50 pt-3">
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <span className="flex items-center gap-1">
+            <MessageCircle className="h-3.5 w-3.5" />
+            {item.totalComments} comments
+          </span>
+          <span>{item.totalReactions} reactions</span>
+        </div>
+        <button onClick={onOpenEmail} className="text-xs font-medium text-primary hover:underline">
+          Open email
         </button>
-      </div>
-
-      <div className="flex-1 px-4 pb-24">
-        <div className="mb-4">
-          <h1 className="text-2xl font-bold text-foreground flex items-center gap-2">
-            <Hash className="h-6 w-6" />
-            {topic.name}
-          </h1>
-          <p className="text-sm text-muted-foreground mt-1">{emails.length} newsletters</p>
-        </div>
-
-        <ShineBorder
-          className="mb-6 rounded-2xl bg-card p-4"
-          color={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
-          borderRadius={16}
-          borderWidth={3}
-          duration={8}
-        >
-          <div className="flex items-start gap-2 mb-3">
-            <Sparkles className="h-5 w-5 text-primary shrink-0 mt-0.5" />
-            <div>
-              <h3 className="text-sm font-semibold text-foreground">AI Summary</h3>
-              <p className="text-xs text-muted-foreground">Based on {emails.length} newsletters</p>
-            </div>
-          </div>
-          <p className="text-sm text-foreground/90 leading-relaxed">{topic.summary}</p>
-        </ShineBorder>
-
-        <div className="mb-6">
-          <h3 className="text-sm font-semibold text-foreground mb-3">Key Points</h3>
-          <ul className="space-y-2">
-            {topic.keyPoints.map((point, idx) => (
-              <li key={idx} className="flex items-start gap-2">
-                <span className="text-primary font-semibold text-sm mt-0.5">•</span>
-                <span className="text-sm text-foreground/80">{point}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        <button className="w-full mb-6 flex items-center justify-center gap-2 rounded-xl bg-secondary py-3 text-sm font-medium text-secondary-foreground hover:bg-secondary/80 transition-colors">
-          <Share2 className="h-4 w-4" />
-          Share to circle
-        </button>
-
-        <div>
-          <h3 className="text-sm font-semibold text-foreground mb-3">From these newsletters</h3>
-          <div className="space-y-3">
-            {emails.map((email) => (
-              <div
-                key={email.id}
-                onClick={() => router.push(`/inbox/${email.id}`)}
-                className="flex items-center gap-3 rounded-xl bg-card p-3 shadow-sm ring-1 ring-border/60 cursor-pointer hover:shadow-md transition-shadow"
-              >
-                {email.issueImageEmoji && (
-                  <div className="h-10 w-10 shrink-0 rounded-lg bg-gradient-to-br from-secondary to-secondary/50 flex items-center justify-center">
-                    <span className="text-lg">{email.issueImageEmoji}</span>
-                  </div>
-                )}
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs text-muted-foreground">{email.senderName}</p>
-                  <h4 className="text-sm font-medium text-foreground line-clamp-1">{email.newsletterTitle}</h4>
-                </div>
-                <span className="text-xs text-muted-foreground shrink-0">{email.receivedAt}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (emailId: string) => void }) {
-  const [currentIndex, setCurrentIndex] = useState(0)
-  const [isDragging, setIsDragging] = useState(false)
-
-  const handleDragEnd = (_: unknown, info: { offset: { x: number }; velocity: { x: number } }) => {
-    const threshold = 100
-    const velocity = info.velocity.x
-    const offset = info.offset.x
-
-    if (Math.abs(offset) > threshold || Math.abs(velocity) > 500) {
-      setCurrentIndex((prev) => (prev + 1) % emails.length)
-    }
-
-    setTimeout(() => setIsDragging(false), 100)
-  }
-
-  const visibleCards = emails.slice(currentIndex, currentIndex + 3)
-  if (visibleCards.length < 3) visibleCards.push(...emails.slice(0, 3 - visibleCards.length))
-
-  return (
-    <div className="relative h-[280px] w-full">
-      <LayoutGroup>
-        <AnimatePresence mode="popLayout">
-          {visibleCards.map((email, index) => {
-            const isTop = index === 0
-            return (
-              <motion.div
-                key={`${email.id}-${currentIndex}-${index}`}
-                layout
-                initial={{ scale: 0.95, y: 20, opacity: 0 }}
-                animate={{
-                  scale: 1 - index * 0.05,
-                  y: index * 8,
-                  zIndex: visibleCards.length - index,
-                  opacity: 1 - index * 0.2,
-                }}
-                exit={{ x: 300, opacity: 0, scale: 0.9 }}
-                transition={{ type: "spring", stiffness: 300, damping: 25 }}
-                drag={isTop ? "x" : false}
-                dragConstraints={{ left: 0, right: 0 }}
-                dragElastic={0.7}
-                onDragStart={() => setIsDragging(true)}
-                onDragEnd={handleDragEnd}
-                className="absolute inset-x-0 top-0 cursor-grab active:cursor-grabbing"
-                style={{ touchAction: "pan-y" }}
-              >
-                <IssueCard email={email} onClick={() => onCardClick(email.id)} isDragging={isDragging} />
-              </motion.div>
-            )
-          })}
-        </AnimatePresence>
-      </LayoutGroup>
-
-      <div className="absolute -bottom-6 left-1/2 -translate-x-1/2 flex gap-1.5">
-        {emails.map((_, idx) => (
-          <button
-            key={idx}
-            onClick={() => setCurrentIndex(idx)}
-            className={cn(
-              "h-1.5 rounded-full transition-all",
-              idx === currentIndex % emails.length ? "w-4 bg-primary" : "w-1.5 bg-muted-foreground/30",
-            )}
-          />
-        ))}
-      </div>
-    </div>
-  )
-}
-
-function MasonryGrid({ emails, onCardClick }: { emails: Email[]; onCardClick: (emailId: string) => void }) {
-  const leftColumn: Email[] = []
-  const rightColumn: Email[] = []
-
-  emails.forEach((email, index) => {
-    if (index % 2 === 0) leftColumn.push(email)
-    else rightColumn.push(email)
-  })
-
-  return (
-    <div className="flex gap-3">
-      <div className="flex-1 flex flex-col gap-3">
-        {leftColumn.map((email) => (
-          <IssueCard key={email.id} email={email} onClick={() => onCardClick(email.id)} />
-        ))}
-      </div>
-      <div className="flex-1 flex flex-col gap-3">
-        {rightColumn.map((email) => (
-          <IssueCard key={email.id} email={email} onClick={() => onCardClick(email.id)} />
-        ))}
-      </div>
-    </div>
-  )
-}
-
-// --- Retention Header Components ---
-function TodaysDigestCard({ onOpenToday }: { onOpenToday: () => void }) {
-  return (
-    <div className="rounded-2xl bg-gradient-to-br from-primary/10 via-primary/5 to-background p-4 ring-1 ring-primary/20">
-      <div className="flex items-start gap-3 mb-3">
-        <div className="h-10 w-10 rounded-xl bg-primary/20 flex items-center justify-center">
-          <CalendarDays className="h-5 w-5 text-primary" />
-        </div>
-        <div className="flex-1">
-          <h3 className="text-sm font-semibold text-foreground">Today&apos;s Digest</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">This will become a real daily summary later.</p>
-        </div>
-      </div>
-
-      <button
-        onClick={onOpenToday}
-        className="w-full flex items-center justify-center gap-1 rounded-xl bg-primary py-2.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-      >
-        Open today&apos;s emails
-        <ChevronRight className="h-4 w-4" />
-      </button>
-    </div>
-  )
-}
-
-function DailyMissionCard() {
-  const { commentsToday, goal, streakCount } = useDailyMissionStore()
-
-  const mission = { title: "Leave 1 comment today", current: commentsToday, target: goal }
-  const completed = mission.current >= mission.target
-  const hasStreakReward = streakCount >= 7
-
-  return (
-    <div className="rounded-2xl border border-border/50 bg-card p-4">
-      <div className="flex items-center gap-3">
-        <div
-          className={cn(
-            "h-10 w-10 rounded-xl flex items-center justify-center transition-colors",
-            completed ? "bg-green-500/20" : "bg-amber-500/20",
-          )}
-        >
-          <Target className={cn("h-5 w-5", completed ? "text-green-500" : "text-amber-500")} />
-        </div>
-        <div className="flex-1 min-w-0">
-          <h3 className="text-sm font-semibold text-foreground">Daily Mission</h3>
-          {completed && hasStreakReward ? (
-            <p className="text-xs text-green-500 font-medium truncate">Completed · {streakCount}-day streak! 🔥</p>
-          ) : completed && streakCount > 0 ? (
-            <p className="text-xs text-green-500 font-medium truncate">Completed · {streakCount}-day streak</p>
-          ) : (
-            <p className="text-xs text-muted-foreground truncate">{mission.title}</p>
-          )}
-        </div>
-        <div className="text-right">
-          <span className={cn("text-sm font-bold", completed ? "text-green-500" : "text-foreground")}>
-            {mission.current}/{mission.target}
-          </span>
-          <p className="text-[10px] text-muted-foreground">{completed ? "Completed!" : "In progress"}</p>
-        </div>
-      </div>
-
-      <div className="mt-3 h-1.5 rounded-full bg-secondary overflow-hidden">
-        <div
-          className={cn("h-full rounded-full transition-all duration-500", completed ? "bg-green-500" : "bg-amber-500")}
-          style={{ width: `${(mission.current / mission.target) * 100}%` }}
-        />
       </div>
     </div>
   )
 }
 
 // --- Main Page ---
-export default function InboxPage() {
-  const { toast } = useToast()
+type TabType = "feed" | "ads"
+type LayoutMode = "list" | "grid"
 
-  const [activeTab, setActiveTab] = useState<TabType>("byTopics")
-  const [selectedTopicId, setSelectedTopicId] = useState<string>("")
-  const [layout, setLayout] = useState<LayoutMode>("list")
-  const [showTopicDetail, setShowTopicDetail] = useState(false)
-  const [selectedTopic, setSelectedTopic] = useState<TopicInfo | null>(null)
-
-  const { rows, loading, newCount, lastSeenAt, markSeenNow, pendingToastKeyRef } = useInboxEmails(200, 5000)
-
-  const allEmails: Email[] = useMemo(() => rowsToUiEmails(rows), [rows])
-  const topicsWithStats: TopicInfo[] = useMemo(() => buildTopics(allEmails), [allEmails])
-
-  const [isAllScrolledDown, setIsAllScrolledDown] = useState(false)
-  const allTopRef = useRef<HTMLDivElement>(null)
-
-  const [newOnly, setNewOnly] = useState(false)
-
-  const [transientNewIds, setTransientNewIds] = useState<string[]>([])
-  const transientTimerRef = useRef<number | null>(null)
-
-  const NEW_HIGHLIGHT_LIMIT = 3
-
-  const derivedNewIdsSet = useMemo(() => {
-    if (!lastSeenAt) return new Set<string>()
-    const lastSeenMs = new Date(lastSeenAt).getTime()
-    const ids = allEmails
-      .filter((e) => e.receivedAtIso && new Date(e.receivedAtIso).getTime() > lastSeenMs)
-      .slice(0, NEW_HIGHLIGHT_LIMIT)
-      .map((e) => e.id)
-    return new Set(ids)
-  }, [allEmails, lastSeenAt])
-
-  const effectiveNewIdsSet = useMemo(() => {
-    if (transientNewIds.length > 0) return new Set(transientNewIds)
-    return derivedNewIdsSet
-  }, [transientNewIds, derivedNewIdsSet])
-
-  const hasAnyNew = effectiveNewIdsSet.size > 0 || newCount > 0
-
-  useEffect(() => {
-    if (topicsWithStats.length > 0 && !selectedTopicId) setSelectedTopicId(topicsWithStats[0].id)
-  }, [topicsWithStats, selectedTopicId])
-
-  useEffect(() => {
-    if (!selectedTopicId) return
-    setSelectedTopic(topicsWithStats.find((x) => x.id === selectedTopicId) ?? null)
-  }, [selectedTopicId, topicsWithStats])
-
-  const selectedTopicEmails = useMemo(
-    () => (selectedTopicId ? filterEmailsByTopicId(allEmails, selectedTopicId) : []),
-    [allEmails, selectedTopicId],
+function MasonryGrid({ children }: { children: React.ReactNode[] }) {
+  const leftColumn: React.ReactNode[] = []
+  const rightColumn: React.ReactNode[] = []
+  children.forEach((child, index) => (index % 2 === 0 ? leftColumn.push(child) : rightColumn.push(child)))
+  return (
+    <div className="flex gap-3">
+      <div className="flex-1 flex flex-col gap-3">{leftColumn}</div>
+      <div className="flex-1 flex flex-col gap-3">{rightColumn}</div>
+    </div>
   )
+}
 
-  const lastNotifiedKeyRef = useRef<string | null>(null)
-  const lastNotifiedAtRef = useRef<number>(0)
+export default function TopicsPage() {
+  const router = useRouter()
+  const [activeTab, setActiveTab] = useState<TabType>("feed")
+  const [layout, setLayout] = useState<LayoutMode>("list")
 
-  useEffect(() => {
-    if (loading) return
-    if (newCount <= 0) return
+  const [loading, setLoading] = useState(true)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [items, setItems] = useState<TopicFeedItem[]>([])
+  const [error, setError] = useState<string | null>(null)
 
-    const key = pendingToastKeyRef.current
-    if (!key) return
+  const [cursor, setCursor] = useState<string | null>(null)
+  const [hasMore, setHasMore] = useState(true)
 
-    const now = Date.now()
-    if (now - lastNotifiedAtRef.current < 10000) return
-    if (lastNotifiedKeyRef.current === key) return
+  const sentinelRef = useRef<HTMLDivElement | null>(null)
 
-    toast({
-      title: "New emails arrived",
-      description: `${newCount} new email${newCount > 1 ? "s" : ""} received.`,
+  const mapRows = useCallback((rows: FeedApiRow[]) => {
+    return (rows ?? []).map((row) => {
+      const latest: Comment[] = Array.isArray(row.latest_comments)
+        ? row.latest_comments.map((c: any) => ({
+            id: c.id,
+            authorId: c.authorId,
+            authorName: c.authorName ?? "Unknown",
+            authorAvatarColor: avatarColorFromUserId(c.authorId),
+            text: c.text ?? "",
+            createdAt: c.createdAt,
+            totalReactions: c.totalReactions ?? 0,
+          }))
+        : []
+
+      const senderName = extractNameFromEmail(row.from_address ?? "Unknown")
+      return {
+        id: `feed-${row.circle_id}-${row.email_id}`,
+        emailId: row.email_id,
+        circleId: row.circle_id,
+        circleName: row.circle_name ?? "Circle",
+        topic: "Today in your circles",
+        newsletterTitle: row.subject ?? "(no subject)",
+        senderName,
+        comments: latest,
+        totalComments: row.total_comments ?? 0,
+        totalReactions: row.total_reactions ?? 0,
+        sharedAt: row.shared_at,
+      }
     })
-
-    lastNotifiedKeyRef.current = key
-    lastNotifiedAtRef.current = now
-  }, [newCount, loading, toast, pendingToastKeyRef])
-
-  useEffect(() => {
-    if (activeTab !== "all") {
-      setIsAllScrolledDown(false)
-      return
-    }
-
-    const threshold = 120
-    const onScroll = () => {
-      const y = window.scrollY || 0
-      setIsAllScrolledDown(y > threshold)
-    }
-
-    onScroll()
-    window.addEventListener("scroll", onScroll, { passive: true })
-    return () => window.removeEventListener("scroll", onScroll)
-  }, [activeTab])
-
-  useEffect(() => {
-    if (newOnly && effectiveNewIdsSet.size === 0) setNewOnly(false)
-  }, [newOnly, effectiveNewIdsSet])
-
-  useEffect(() => {
-    return () => {
-      if (transientTimerRef.current) window.clearTimeout(transientTimerRef.current)
-      transientTimerRef.current = null
-    }
   }, [])
 
-  const handleTopicHeadingClick = () => setShowTopicDetail(true)
-  const handleIssueCardClick = () => setShowTopicDetail(true)
+  const loadPage = useCallback(
+    async (nextCursor: string | null) => {
+      const isFirst = nextCursor == null
+      try {
+        if (isFirst) {
+          setLoading(true)
+          setError(null)
+        } else {
+          setLoadingMore(true)
+        }
 
-  const handleOpenTodayEmails = () => setActiveTab("all")
+        const qs = new URLSearchParams()
+        qs.set("limit", "20")
+        if (nextCursor) qs.set("cursor", nextCursor)
 
-  const allEmailsToRender = useMemo(() => {
-    if (!newOnly) return allEmails
-    return allEmails.filter((e) => effectiveNewIdsSet.has(e.id))
-  }, [allEmails, newOnly, effectiveNewIdsSet])
+        const res = await fetch(`/api/circles/feed?${qs.toString()}`, {
+          cache: "no-store",
+          credentials: "include",
+        })
+        const data = await safeReadJson<ApiFeedResponse>(res)
 
-  if (loading) {
-    return (
-      <div className="flex min-h-full flex-col items-center justify-center">
-        <p className="text-sm text-muted-foreground">Loading...</p>
-      </div>
+        if (!data.ok) {
+          if (isFirst) setItems([])
+          setError(data.error ?? "Failed to load feed")
+          setHasMore(false)
+          return
+        }
+
+        const mapped = mapRows(data.items ?? [])
+
+        setItems((prev) => (isFirst ? mapped : [...prev, ...mapped]))
+        const nc = data.nextCursor ?? null
+        setCursor(nc)
+        setHasMore(Boolean(nc) && mapped.length > 0)
+      } catch (e: any) {
+        if (isFirst) setItems([])
+        setError(e?.message ?? "Failed to load feed")
+        setHasMore(false)
+      } finally {
+        setLoading(false)
+        setLoadingMore(false)
+      }
+    },
+    [mapRows]
+  )
+
+  useEffect(() => {
+    loadPage(null)
+  }, [loadPage])
+
+  // infinite scroll
+  useEffect(() => {
+    if (activeTab !== "feed") return
+    const el = sentinelRef.current
+    if (!el) return
+
+    const io = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0]
+        if (!entry?.isIntersecting) return
+        if (loading || loadingMore) return
+        if (!hasMore) return
+        loadPage(cursor)
+      },
+      { root: null, rootMargin: "200px", threshold: 0 }
     )
-  }
 
-  if (showTopicDetail && selectedTopic) {
-    return <TopicDetailView topic={selectedTopic} emails={selectedTopicEmails} onBack={() => setShowTopicDetail(false)} />
+    io.observe(el)
+    return () => io.disconnect()
+  }, [activeTab, cursor, hasMore, loadPage, loading, loadingMore])
+
+  const handleOpenEmail = (emailId: string) => {
+    const href = emailDetailHref(emailId)
+    if (!href) return
+    router.push(href)
   }
 
   return (
     <div className="flex min-h-full flex-col">
-      <div className="px-4 pt-4 pb-2">
-        <h1 className="text-2xl font-bold text-foreground">Inbox</h1>
-        <p className="text-sm text-muted-foreground">Your newsletters, organized</p>
-      </div>
-
-      <div className="px-4 py-3 space-y-3">
-        <TodaysDigestCard onOpenToday={handleOpenTodayEmails} />
-        <DailyMissionCard />
-      </div>
-
-      <div className="sticky top-0 z-10 bg-background pt-2 pb-2">
+      <div className="sticky top-0 z-10 bg-background pt-4 pb-2">
         <div className="mx-4 flex rounded-xl bg-secondary/50 p-1">
           <button
-            onClick={() => setActiveTab("byTopics")}
+            onClick={() => setActiveTab("feed")}
             className={cn(
               "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "byTopics" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              activeTab === "feed" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
             )}
           >
-            By topics
+            <MessageCircle className="h-4 w-4" />
+            Feed
           </button>
-
           <button
-            onClick={() => setActiveTab("all")}
+            onClick={() => setActiveTab("ads")}
             className={cn(
               "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "all" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              activeTab === "ads" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
             )}
           >
-            All
-            {newCount > 0 ? (
-              <span className="ml-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
-                +{newCount}
-              </span>
-            ) : null}
+            <Megaphone className="h-4 w-4" />
+            Ad Board
           </button>
         </div>
+
+        {/* (옵션) 레이아웃 토글 */}
+        {activeTab === "feed" ? (
+          <div className="mx-4 mt-2 flex justify-end gap-2">
+            <button
+              onClick={() => setLayout("list")}
+              className={cn(
+                "rounded-lg px-2 py-1 text-xs",
+                layout === "list" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <LayoutList className="h-4 w-4" />
+            </button>
+            <button
+              onClick={() => setLayout("grid")}
+              className={cn(
+                "rounded-lg px-2 py-1 text-xs",
+                layout === "grid" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"
+              )}
+            >
+              <Grid3X3 className="h-4 w-4" />
+            </button>
+          </div>
+        ) : null}
       </div>
 
-      <div className="flex-1 px-4 pt-4 pb-24">
-        {activeTab === "byTopics" ? (
-          <>
-            {topicsWithStats.length > 0 && (
-              <div className="flex gap-2 overflow-x-auto pb-4 -mx-4 px-4 scrollbar-hide">
-                {topicsWithStats.map((topic) => (
-                  <button
-                    key={topic.id}
-                    onClick={() => setSelectedTopicId(topic.id)}
-                    className={cn(
-                      "shrink-0 rounded-full px-4 py-2 text-sm font-medium transition-colors",
-                      selectedTopicId === topic.id
-                        ? "bg-foreground text-background"
-                        : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-                    )}
-                  >
-                    {topic.name}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <div className="flex items-start justify-between mb-4">
-              <button onClick={handleTopicHeadingClick} className="text-left hover:opacity-80 transition-opacity">
-                <h2 className="text-xl font-bold text-foreground flex items-center gap-1">
-                  <Hash className="h-5 w-5" />
-                  {topicsWithStats.find((t) => t.id === selectedTopicId)?.name || "Loading..."}
-                </h2>
-                <p className="text-sm text-muted-foreground">{`${selectedTopicEmails.length} issues`}</p>
-              </button>
-
-              <div className="flex items-center gap-1 rounded-lg bg-secondary/50 p-1">
-                {(Object.keys(layoutIcons) as LayoutMode[]).map((mode) => {
-                  const Icon = layoutIcons[mode]
-                  return (
-                    <button
-                      key={mode}
-                      onClick={() => setLayout(mode)}
-                      className={cn(
-                        "rounded-md p-2 transition-all",
-                        layout === mode
-                          ? "bg-primary text-primary-foreground"
-                          : "text-muted-foreground hover:text-foreground hover:bg-secondary",
-                      )}
-                      aria-label={`Switch to ${mode} layout`}
-                    >
-                      <Icon className="h-4 w-4" />
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-
-            {selectedTopicEmails.length === 0 ? (
-              <div className="flex items-center justify-center py-8">
-                <p className="text-sm text-muted-foreground">No emails found for this topic</p>
-              </div>
-            ) : (
-              <>
-                {layout === "list" && (
-                  <div className="space-y-4">
-                    {selectedTopicEmails.map((email) => (
-                      <IssueCard key={email.id} email={email} onClick={handleIssueCardClick} />
-                    ))}
-                  </div>
-                )}
-
-                {layout === "grid" && <MasonryGrid emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
-
-                {layout === "stack" && <StackLayout emails={selectedTopicEmails} onCardClick={handleIssueCardClick} />}
-              </>
-            )}
-          </>
+      <div className="flex-1 px-4 pb-24">
+        {activeTab !== "feed" ? (
+          <div className="text-sm text-muted-foreground">Ads 탭은 다음 단계에서 연결.</div>
+        ) : loading ? (
+          <div className="text-sm text-muted-foreground">Loading…</div>
+        ) : error ? (
+          <div className="text-sm text-destructive">{error}</div>
+        ) : items.length === 0 ? (
+          <div className="text-sm text-muted-foreground">No feed yet. Share a newsletter to a circle.</div>
+        ) : layout === "list" ? (
+          <div className="space-y-4">
+            {items.map((item) => (
+              <FeedCardComponent key={item.id} item={item} onOpenEmail={() => handleOpenEmail(item.emailId)} />
+            ))}
+          </div>
         ) : (
-          <div className="flex flex-col gap-4">
-            <div ref={allTopRef} />
+          <MasonryGrid>
+            {items.map((item) => (
+              <FeedCardComponent key={item.id} item={item} onOpenEmail={() => handleOpenEmail(item.emailId)} />
+            ))}
+          </MasonryGrid>
+        )}
 
-            {hasAnyNew && (
-              <div className="flex items-center justify-between gap-2">
-                <div className="text-xs text-muted-foreground">
-                  {effectiveNewIdsSet.size > 0
-                    ? `New: ${effectiveNewIdsSet.size}`
-                    : newCount > 0
-                      ? `New: ${newCount}`
-                      : "New"}
-                </div>
-
-                <button
-                  onClick={() => setNewOnly((v) => !v)}
-                  className={cn(
-                    "rounded-full px-3 py-1 text-xs font-semibold transition-colors ring-1 ring-border",
-                    newOnly ? "bg-foreground text-background" : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
-                  )}
-                >
-                  NEW only
-                </button>
-              </div>
-            )}
-
-            {newCount > 0 && isAllScrolledDown && (
-              <button
-                onClick={() => {
-                  const ids = Array.from(derivedNewIdsSet)
-                  setTransientNewIds(ids)
-
-                  if (transientTimerRef.current) window.clearTimeout(transientTimerRef.current)
-                  transientTimerRef.current = window.setTimeout(() => setTransientNewIds([]), 2600)
-
-                  allTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
-                  window.scrollTo({ top: 0, behavior: "smooth" })
-                  markSeenNow()
-                }}
-                className="sticky top-2 z-20 flex items-center justify-center gap-2 rounded-xl border border-border bg-card/90 px-4 py-2 text-sm font-semibold text-foreground shadow-sm backdrop-blur hover:bg-card transition-colors"
-              >
-                <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10">
-                  <Mail className="h-4 w-4 text-primary" />
-                </span>
-                New {newCount} email{newCount > 1 ? "s" : ""} — jump to top
-              </button>
-            )}
-
-            {allEmailsToRender.length === 0 ? (
-              <div className="flex items-center justify-center py-10">
-                <div className="rounded-2xl border border-dashed p-8 text-center text-muted-foreground">
-                  <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-secondary">
-                    <Mail className="h-5 w-5" />
-                  </div>
-                  {newOnly
-                    ? "No NEW emails to show."
-                    : "No emails found yet. Send a newsletter to your @mg.scaaf.day address."}
-                </div>
-              </div>
+        {/* sentinel */}
+        {activeTab === "feed" ? (
+          <div ref={sentinelRef} className="py-6">
+            {loadingMore ? (
+              <div className="text-xs text-muted-foreground">Loading more…</div>
+            ) : hasMore ? (
+              <div className="text-xs text-muted-foreground">Scroll to load more</div>
             ) : (
-              allEmailsToRender.map((email) => (
-                <NewsletterCard key={email.id} email={email} glowNew={effectiveNewIdsSet.has(email.id)} />
-              ))
+              <div className="text-xs text-muted-foreground">You’re all caught up</div>
             )}
           </div>
-        )}
+        ) : null}
       </div>
     </div>
   )
