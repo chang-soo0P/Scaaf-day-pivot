@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
-import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { emailDetailHref } from "@/lib/email-href"
 import {
@@ -106,9 +105,7 @@ function useInboxEmails(limit = 200, pollMs = 5000) {
   const [lastSeenAt, setLastSeenAt] = useState<string | null>(null)
   const [newCount, setNewCount] = useState(0)
 
-  // dedupe key for "new arrival" (top row 기준)
   const pendingToastKeyRef = useRef<string | null>(null)
-
   const inFlightRef = useRef<AbortController | null>(null)
   const initialLoadedRef = useRef(false)
 
@@ -146,7 +143,6 @@ function useInboxEmails(limit = 200, pollMs = 5000) {
     const top = nextRows[0]
     const topKey = top ? `${top.id}:${top.received_at ?? ""}` : null
 
-    // 최초 로딩: lastSeenAt만 잡고 newCount/토스트는 0
     if (!initialLoadedRef.current) {
       initialLoadedRef.current = true
       const topAt = top?.received_at ?? null
@@ -172,9 +168,7 @@ function useInboxEmails(limit = 200, pollMs = 5000) {
 
     setNewCount(cnt)
 
-    if (cnt > 0 && topKey) {
-      pendingToastKeyRef.current = topKey
-    }
+    if (cnt > 0 && topKey) pendingToastKeyRef.current = topKey
   }
 
   useEffect(() => {
@@ -272,7 +266,6 @@ function filterEmailsByTopicId(emails: Email[], topicId: string) {
   return emails.filter((e) => toTopicId(e.topics[0] ?? "other") === topicId)
 }
 
-// --- Layout Icons ---
 const layoutIcons = {
   stack: Layers,
   grid: Grid3X3,
@@ -353,13 +346,7 @@ function IssueCard({
   )
 }
 
-function NewsletterCard({
-  email,
-  glowNew,
-}: {
-  email: Email
-  glowNew?: boolean
-}) {
+function NewsletterCard({ email, glowNew }: { email: Email; glowNew?: boolean }) {
   const stats = {
     highlightCount: email.highlights.length,
     commentCount: email.comments.length,
@@ -387,7 +374,7 @@ function NewsletterCard({
       <div
         className={cn(
           "rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 transition-all duration-500 hover:shadow-md",
-          glowNew && "ring-2 ring-primary/35 bg-primary/5 shadow-md"
+          glowNew && "ring-2 ring-primary/35 bg-primary/5 shadow-md",
         )}
       >
         <div className="flex items-start justify-between gap-3">
@@ -420,9 +407,7 @@ function NewsletterCard({
           <span>{email.receivedAt}</span>
 
           {glowNew && (
-            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
-              NEW
-            </span>
+            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">NEW</span>
           )}
 
           {stats.highlightCount > 0 && (
@@ -443,13 +428,7 @@ function NewsletterCard({
       </div>
     </Link>
   ) : (
-    <div
-      className={cn(
-        "rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 transition-all duration-500 hover:shadow-md opacity-60 cursor-not-allowed",
-        glowNew && "ring-2 ring-primary/35 bg-primary/5 shadow-md",
-      )}
-    >
-      {/* 동일 내용, 단 클릭 불가 상태 */}
+    <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 opacity-60 cursor-not-allowed">
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <p className="text-xs font-medium text-muted-foreground">{email.senderName}</p>
@@ -471,24 +450,11 @@ function NewsletterCard({
   )
 }
 
-function TopicDetailView({
-  topic,
-  emails,
-  onBack,
-}: {
-  topic: TopicInfo
-  emails: Email[]
-  onBack: () => void
-}) {
-  const router = useRouter()
-
+function TopicDetailView({ topic, emails, onBack }: { topic: TopicInfo; emails: Email[]; onBack: () => void }) {
   return (
     <div className="flex flex-col min-h-full">
       <div className="sticky top-0 z-10 bg-background pt-4 pb-2 px-4">
-        <button
-          onClick={onBack}
-          className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-        >
+        <button onClick={onBack} className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
           <ChevronLeft className="h-4 w-4" />
           Back to topics
         </button>
@@ -543,7 +509,10 @@ function TopicDetailView({
             {emails.map((email) => (
               <div
                 key={email.id}
-                onClick={() => router.push(`/inbox/${email.id}`)}
+                onClick={() => {
+                  const href = emailDetailHref(email.id) || `/inbox/${email.id}`
+                  window.location.href = href
+                }}
                 className="flex items-center gap-3 rounded-xl bg-card p-3 shadow-sm ring-1 ring-border/60 cursor-pointer hover:shadow-md transition-shadow"
               >
                 {email.issueImageEmoji && (
@@ -565,13 +534,7 @@ function TopicDetailView({
   )
 }
 
-function StackLayout({
-  emails,
-  onCardClick,
-}: {
-  emails: Email[]
-  onCardClick: (emailId: string) => void
-}) {
+function StackLayout({ emails, onCardClick }: { emails: Email[]; onCardClick: (emailId: string) => void }) {
   const [currentIndex, setCurrentIndex] = useState(0)
   const [isDragging, setIsDragging] = useState(false)
 
@@ -640,13 +603,7 @@ function StackLayout({
   )
 }
 
-function MasonryGrid({
-  emails,
-  onCardClick,
-}: {
-  emails: Email[]
-  onCardClick: (emailId: string) => void
-}) {
+function MasonryGrid({ emails, onCardClick }: { emails: Email[]; onCardClick: (emailId: string) => void }) {
   const leftColumn: Email[] = []
   const rightColumn: Email[] = []
 
@@ -757,20 +714,16 @@ export default function InboxPage() {
   const allEmails: Email[] = useMemo(() => rowsToUiEmails(rows), [rows])
   const topicsWithStats: TopicInfo[] = useMemo(() => buildTopics(allEmails), [allEmails])
 
-  // All tab: banner only when scrolled down
   const [isAllScrolledDown, setIsAllScrolledDown] = useState(false)
   const allTopRef = useRef<HTMLDivElement>(null)
 
-  // NEW only toggle (visible only when NEW exists)
   const [newOnly, setNewOnly] = useState(false)
 
-  // transient glow (banner click 후 2~3초 유지)
   const [transientNewIds, setTransientNewIds] = useState<string[]>([])
   const transientTimerRef = useRef<number | null>(null)
 
   const NEW_HIGHLIGHT_LIMIT = 3
 
-  // derived "new ids" from lastSeenAt (실시간 NEW 정의)
   const derivedNewIdsSet = useMemo(() => {
     if (!lastSeenAt) return new Set<string>()
     const lastSeenMs = new Date(lastSeenAt).getTime()
@@ -781,7 +734,6 @@ export default function InboxPage() {
     return new Set(ids)
   }, [allEmails, lastSeenAt])
 
-  // effective NEW ids (transient가 있으면 transient 우선)
   const effectiveNewIdsSet = useMemo(() => {
     if (transientNewIds.length > 0) return new Set(transientNewIds)
     return derivedNewIdsSet
@@ -789,12 +741,10 @@ export default function InboxPage() {
 
   const hasAnyNew = effectiveNewIdsSet.size > 0 || newCount > 0
 
-  // init selected topic
   useEffect(() => {
     if (topicsWithStats.length > 0 && !selectedTopicId) setSelectedTopicId(topicsWithStats[0].id)
   }, [topicsWithStats, selectedTopicId])
 
-  // selected topic object
   useEffect(() => {
     if (!selectedTopicId) return
     setSelectedTopic(topicsWithStats.find((x) => x.id === selectedTopicId) ?? null)
@@ -805,7 +755,6 @@ export default function InboxPage() {
     [allEmails, selectedTopicId],
   )
 
-  // Toast dedupe: "새로운 topKey" 기준으로 1회만 + 최소 10초 간격
   const lastNotifiedKeyRef = useRef<string | null>(null)
   const lastNotifiedAtRef = useRef<number>(0)
 
@@ -829,7 +778,6 @@ export default function InboxPage() {
     lastNotifiedAtRef.current = now
   }, [newCount, loading, toast, pendingToastKeyRef])
 
-  // All 탭에서만 스크롤 감지해서 배너 노출 제어
   useEffect(() => {
     if (activeTab !== "all") {
       setIsAllScrolledDown(false)
@@ -847,12 +795,10 @@ export default function InboxPage() {
     return () => window.removeEventListener("scroll", onScroll)
   }, [activeTab])
 
-  // NEW only가 켜져 있는데 NEW가 사라지면 자동 해제
   useEffect(() => {
     if (newOnly && effectiveNewIdsSet.size === 0) setNewOnly(false)
   }, [newOnly, effectiveNewIdsSet])
 
-  // transient timer cleanup
   useEffect(() => {
     return () => {
       if (transientTimerRef.current) window.clearTimeout(transientTimerRef.current)
@@ -863,11 +809,8 @@ export default function InboxPage() {
   const handleTopicHeadingClick = () => setShowTopicDetail(true)
   const handleIssueCardClick = () => setShowTopicDetail(true)
 
-  const handleOpenTodayEmails = () => {
-    setActiveTab("all")
-  }
+  const handleOpenTodayEmails = () => setActiveTab("all")
 
-  // All tab list (NEW only filter)
   const allEmailsToRender = useMemo(() => {
     if (!newOnly) return allEmails
     return allEmails.filter((e) => effectiveNewIdsSet.has(e.id))
@@ -882,18 +825,11 @@ export default function InboxPage() {
   }
 
   if (showTopicDetail && selectedTopic) {
-    return (
-      <TopicDetailView
-        topic={selectedTopic}
-        emails={selectedTopicEmails}
-        onBack={() => setShowTopicDetail(false)}
-      />
-    )
+    return <TopicDetailView topic={selectedTopic} emails={selectedTopicEmails} onBack={() => setShowTopicDetail(false)} />
   }
 
   return (
     <div className="flex min-h-full flex-col">
-      {/* Header */}
       <div className="px-4 pt-4 pb-2">
         <h1 className="text-2xl font-bold text-foreground">Inbox</h1>
         <p className="text-sm text-muted-foreground">Your newsletters, organized</p>
@@ -904,16 +840,13 @@ export default function InboxPage() {
         <DailyMissionCard />
       </div>
 
-      {/* Tab Switcher */}
       <div className="sticky top-0 z-10 bg-background pt-2 pb-2">
         <div className="mx-4 flex rounded-xl bg-secondary/50 p-1">
           <button
             onClick={() => setActiveTab("byTopics")}
             className={cn(
               "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "byTopics"
-                ? "bg-card text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
+              activeTab === "byTopics" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
             )}
           >
             By topics
@@ -923,9 +856,7 @@ export default function InboxPage() {
             onClick={() => setActiveTab("all")}
             className={cn(
               "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "all"
-                ? "bg-card text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
+              activeTab === "all" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
             )}
           >
             All
@@ -938,11 +869,9 @@ export default function InboxPage() {
         </div>
       </div>
 
-      {/* Content */}
       <div className="flex-1 px-4 pt-4 pb-24">
         {activeTab === "byTopics" ? (
           <>
-            {/* Horizontal topic pills */}
             {topicsWithStats.length > 0 && (
               <div className="flex gap-2 overflow-x-auto pb-4 -mx-4 px-4 scrollbar-hide">
                 {topicsWithStats.map((topic) => (
@@ -962,7 +891,6 @@ export default function InboxPage() {
               </div>
             )}
 
-            {/* Topic heading and view toggle */}
             <div className="flex items-start justify-between mb-4">
               <button onClick={handleTopicHeadingClick} className="text-left hover:opacity-80 transition-opacity">
                 <h2 className="text-xl font-bold text-foreground flex items-center gap-1">
@@ -972,7 +900,6 @@ export default function InboxPage() {
                 <p className="text-sm text-muted-foreground">{`${selectedTopicEmails.length} issues`}</p>
               </button>
 
-              {/* View mode toggle */}
               <div className="flex items-center gap-1 rounded-lg bg-secondary/50 p-1">
                 {(Object.keys(layoutIcons) as LayoutMode[]).map((mode) => {
                   const Icon = layoutIcons[mode]
@@ -995,7 +922,6 @@ export default function InboxPage() {
               </div>
             </div>
 
-            {/* Issue cards based on layout */}
             {selectedTopicEmails.length === 0 ? (
               <div className="flex items-center justify-center py-8">
                 <p className="text-sm text-muted-foreground">No emails found for this topic</p>
@@ -1017,12 +943,9 @@ export default function InboxPage() {
             )}
           </>
         ) : (
-          /* All tab */
           <div className="flex flex-col gap-4">
-            {/* scroll anchor */}
             <div ref={allTopRef} />
 
-            {/* NEW controls row (NEW only toggle) */}
             {hasAnyNew && (
               <div className="flex items-center justify-between gap-2">
                 <div className="text-xs text-muted-foreground">
@@ -1033,9 +956,7 @@ export default function InboxPage() {
                   onClick={() => setNewOnly((v) => !v)}
                   className={cn(
                     "rounded-full px-3 py-1 text-xs font-semibold transition-colors ring-1 ring-border",
-                    newOnly
-                      ? "bg-foreground text-background"
-                      : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
+                    newOnly ? "bg-foreground text-background" : "bg-secondary text-secondary-foreground hover:bg-secondary/80",
                   )}
                 >
                   NEW only
@@ -1043,21 +964,15 @@ export default function InboxPage() {
               </div>
             )}
 
-            {/* NEW banner (only when scrolled down) */}
             {newCount > 0 && isAllScrolledDown && (
               <button
                 onClick={() => {
-                  // 1) 현재 NEW 상단 몇 개를 transient로 저장(= 2~3초 유지)
                   const ids = Array.from(derivedNewIdsSet)
                   setTransientNewIds(ids)
 
                   if (transientTimerRef.current) window.clearTimeout(transientTimerRef.current)
-                  transientTimerRef.current = window.setTimeout(() => {
-                    // 2) 자연스럽게 사라지도록 class만 제거 (transition-all로 fade)
-                    setTransientNewIds([])
-                  }, 2600)
+                  transientTimerRef.current = window.setTimeout(() => setTransientNewIds([]), 2600)
 
-                  // 3) 위로 스크롤 + seen 처리(배지/배너 정리)
                   allTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
                   window.scrollTo({ top: 0, behavior: "smooth" })
                   markSeenNow()
@@ -1067,7 +982,7 @@ export default function InboxPage() {
                 <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10">
                   <Mail className="h-4 w-4 text-primary" />
                 </span>
-                새 메일 {newCount}개 도착 — 위로 이동
+                {newCount} new email{newCount > 1 ? "s" : ""} arrived — jump to top
               </button>
             )}
 
@@ -1082,11 +997,7 @@ export default function InboxPage() {
               </div>
             ) : (
               allEmailsToRender.map((email) => (
-                <NewsletterCard
-                  key={email.id}
-                  email={email}
-                  glowNew={effectiveNewIdsSet.has(email.id)}
-                />
+                <NewsletterCard key={email.id} email={email} glowNew={effectiveNewIdsSet.has(email.id)} />
               ))
             )}
           </div>
