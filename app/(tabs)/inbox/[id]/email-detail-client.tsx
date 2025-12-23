@@ -71,18 +71,20 @@ type ApiReactionToggleResponse =
   | { ok: true; reactions: Comment["reactions"] }
   | { ok: false; error?: string }
 
-// ✅ circles
-type Circle = {
+// ✅ circles (이름 충돌 방지 위해 Circle -> CircleItem)
+type CircleItem = {
   id: string
   name?: string | null
   created_at?: string | null
 }
-type ApiCirclesListResponse = { ok: true; circles: Circle[] } | { ok: false; error?: string }
+type ApiCirclesListResponse = { ok: true; circles: CircleItem[] } | { ok: false; error?: string }
 
 // ✅ share target(모달이 “이메일 공유”인지 “하이라이트 공유”인지 구분)
 type ShareTarget =
   | { type: "email" }
   | { type: "highlight"; highlightId?: string; quote: string }
+
+type ApiShareResponse = { ok: true; duplicated?: boolean } | { ok: false; error?: string }
 
 interface EmailDetailClientProps {
   emailId: string
@@ -160,7 +162,6 @@ function mapDbEmailToView(db: DbEmailRow | null, emailId: string) {
   const subject = db.subject ?? "(no subject)"
 
   const bodyText = (db.body_text && db.body_text.trim()) || (db.body_html && stripHtml(db.body_html)) || ""
-
   const { date, time } = formatHeaderDateTime(db.received_at)
 
   return {
@@ -327,8 +328,9 @@ export default function EmailDetailClient({
   const [showShareModal, setShowShareModal] = useState(false)
   const [showCreateOptions, setShowCreateOptions] = useState(false)
 
-  // ✅ 기존 highlightToShare 유지하되, "이메일 공유"도 지원하기 위해 shareTarget을 추가
+  // ✅ 하이라이트 공유(기존 유지)
   const [highlightToShare, setHighlightToShare] = useState<{ id?: string; quote: string } | null>(null)
+  // ✅ 이메일/하이라이트 공유 모드 구분
   const [shareTarget, setShareTarget] = useState<ShareTarget | null>(null)
 
   const [highlights, setHighlights] = useState<Highlight[]>(initialHighlights)
@@ -338,7 +340,7 @@ export default function EmailDetailClient({
   const [commentsLoading, setCommentsLoading] = useState(false)
 
   // ✅ circles for share modal
-  const [circles, setCircles] = useState<Circle[]>([])
+  const [circles, setCircles] = useState<CircleItem[]>([])
   const [circlesLoading, setCirclesLoading] = useState(false)
   const [circlesError, setCirclesError] = useState<string | null>(null)
   const [sharing, setSharing] = useState(false)
@@ -419,8 +421,8 @@ export default function EmailDetailClient({
   /** -----------------------------
    * share helpers
    * ------------------------------*/
-  async function shareEmailToCircle(circleId: string) {
-    if (!isValidEmailId) return { ok: false as const, error: "Invalid email id" }
+  async function shareEmailToCircle(circleId: string): Promise<ApiShareResponse> {
+    if (!isValidEmailId) return { ok: false, error: "Invalid email id" }
 
     setSharing(true)
     try {
@@ -430,10 +432,10 @@ export default function EmailDetailClient({
         body: JSON.stringify({ circleId, emailId }),
         credentials: "include",
       })
-      const data = await safeReadJson<{ ok: true; duplicated?: boolean } | { ok: false; error?: string }>(res)
+      const data = await safeReadJson<ApiShareResponse>(res)
 
-      if (!res.ok || !data.ok) {
-        return { ok: false as const, error: (data as any)?.error ?? `HTTP ${res.status}` }
+      if (!res.ok) {
+        return { ok: false, error: (data as any)?.error ?? `HTTP ${res.status}` }
       }
       return data
     } finally {
@@ -1081,7 +1083,11 @@ export default function EmailDetailClient({
               animate={{ y: 0 }}
               exit={{ y: 100 }}
               onClick={(e) => e.stopPropagation()}
-              className="w-full max-w-md rounded-2xl bg-card p-4"
+              className={cn(
+                "w-full max-w-md rounded-2xl bg-card p-4",
+                "max-h-[85vh] overflow-hidden",            // ✅ sheet 자체 높이 제한
+                "pb-[calc(env(safe-area-inset-bottom)+96px)]" // ✅ safe-area + 탭바(대략 72~96px) 회피
+              )}
             >
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-lg font-semibold">Share to Circle</h3>
@@ -1102,54 +1108,60 @@ export default function EmailDetailClient({
                 </div>
               )}
 
-              {/* circles list */}
-              {circlesLoading ? (
-                <div className="py-6 text-sm text-muted-foreground">Loading circles…</div>
-              ) : circlesError ? (
-                <div className="py-4 text-sm text-destructive">{circlesError}</div>
-              ) : circles.length === 0 ? (
-                <div className="py-4 text-sm text-muted-foreground">
-                  No circles yet. Create or join a circle first.
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  {circles.map((c) => (
-                    <button
-                      key={c.id}
-                      disabled={sharing}
-                      onClick={async () => {
-                        // 1) 이메일을 feed로 공유 (circle_emails insert)
-                        const r = await shareEmailToCircle(c.id)
-                        if (!r.ok) {
-                          alert(r.error ?? "Share failed")
-                          return
-                        }
+{/* circles list */}
+{circlesLoading ? (
+  <div className="py-6 text-sm text-muted-foreground">Loading circles…</div>
+) : circlesError ? (
+  <div className="py-4 text-sm text-destructive">{circlesError}</div>
+) : circles.length === 0 ? (
+  <div className="py-4 text-sm text-muted-foreground">
+    No circles yet. Create or join a circle first.
+  </div>
+) : (
+  // ✅ scroll container
+  <div className="max-h-[50vh] overflow-y-auto pr-1 -mr-1">
+    <div className="space-y-2">
+      {circles.map((c) => (
+        <button
+          key={c.id}
+          disabled={sharing}
+          onClick={async () => {
+            // 1) 이메일을 feed로 공유 (circle_emails insert)
+            const r = await shareEmailToCircle(c.id)
+            if (!r.ok) {
+              alert(r.error ?? "Share failed")
+              return
+            }
 
-                        // 2) 하이라이트 공유 모드면 기존 기능도 유지
-                        if (shareTarget?.type === "highlight" && highlightToShare?.quote) {
-                          if (!highlightToShare.id) {
-                            const created = await createHighlight(highlightToShare.quote)
-                            if (created) await markHighlightShared(created.id)
-                          } else {
-                            await markHighlightShared(highlightToShare.id)
-                          }
-                        }
+            // 2) 하이라이트 공유 모드면 기존 기능도 유지
+            if (shareTarget?.type === "highlight" && highlightToShare?.quote) {
+              if (!highlightToShare.id) {
+                const created = await createHighlight(highlightToShare.quote)
+                if (created) await markHighlightShared(created.id)
+              } else {
+                await markHighlightShared(highlightToShare.id)
+              }
+            }
 
-                        setShowShareModal(false)
-                        setHighlightToShare(null)
-                        setShareTarget(null)
-                        router.refresh()
-                      }}
-                      className={cn(
-                        "w-full rounded-xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80",
-                        sharing && "opacity-60 cursor-not-allowed"
-                      )}
-                    >
-                      {c.name ?? `Circle ${c.id.slice(0, 6)}`}
-                    </button>
-                  ))}
-                </div>
-              )}
+            setShowShareModal(false)
+            setHighlightToShare(null)
+            setShareTarget(null)
+
+            // 지금은 feed 확인 UX가 중요해서 topics로 보내는 게 체감이 좋아.
+            router.push("/topics")
+          }}
+          className={cn(
+            "w-full rounded-xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80",
+            sharing && "opacity-60 cursor-not-allowed"
+          )}
+        >
+          {c.name ?? `Circle ${c.id.slice(0, 6)}`}
+        </button>
+      ))}
+    </div>
+  </div>
+)}
+
             </motion.div>
           </motion.div>
         )}
