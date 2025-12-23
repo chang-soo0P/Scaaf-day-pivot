@@ -2,6 +2,7 @@
 
 import { Flame, Highlighter, Share2, Check, ChevronRight } from "lucide-react"
 import type { DailyMissionState } from "@/hooks/use-daily-mission"
+import { ShineBorder } from "@/components/ui/shine-border"
 
 interface TodayMissionCardProps {
   state: DailyMissionState
@@ -15,9 +16,22 @@ export function TodayMissionCard({ state, onFindHighlight, onShareHighlight }: T
   const highlightDone = todayHighlightsCount >= 1
   const shareDone = todayCircleSharesCount >= 1
 
+  // ✅ readonly 튜플(as const) 쓰지 말고 mutable string[]로 전달
+  const shineColors: string[] = ["#A07CFE", "#FE8FB5", "#FFBE7B"]
+
+  const borderRadius = 16
+  const borderWidth = 3
+  const duration = 10
+
   if (status === "completed") {
     return (
-      <div className="mb-4 rounded-2xl bg-primary/5 p-4 shadow-sm ring-1 ring-primary/40 animate-in fade-in duration-300">
+      <ShineBorder
+        className="mb-4 rounded-2xl bg-primary/5 p-4 shadow-sm ring-1 ring-primary/30"
+        color={shineColors}
+        borderRadius={borderRadius}
+        borderWidth={borderWidth}
+        duration={duration}
+      >
         <div className="flex items-start gap-3">
           <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-primary/20">
             <Flame className="h-5 w-5 text-primary" />
@@ -33,7 +47,7 @@ export function TodayMissionCard({ state, onFindHighlight, onShareHighlight }: T
             </div>
           </div>
         </div>
-      </div>
+      </ShineBorder>
     )
   }
 
@@ -62,11 +76,18 @@ export function TodayMissionCard({ state, onFindHighlight, onShareHighlight }: T
   }
 
   return (
-    <div className="mb-4 rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border">
+    <ShineBorder
+      className="mb-4 rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border"
+      color={shineColors}
+      borderRadius={borderRadius}
+      borderWidth={borderWidth}
+      duration={duration}
+    >
       <div className="flex items-start gap-3">
         <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-primary/10">
           <Flame className="h-5 w-5 text-primary" />
         </div>
+
         <div className="flex-1">
           <h3 className="text-base font-semibold text-foreground">{title}</h3>
           <p className="mt-1 text-sm text-muted-foreground">{description}</p>
@@ -75,15 +96,16 @@ export function TodayMissionCard({ state, onFindHighlight, onShareHighlight }: T
           <div className="mt-3 flex flex-wrap gap-2">
             <span
               className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-all ${
-                highlightDone ? "bg-primary text-primary-foreground scale-100" : "bg-secondary text-muted-foreground"
+                highlightDone ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"
               }`}
             >
               {highlightDone ? <Check className="h-3 w-3" /> : <Highlighter className="h-3 w-3" />}
               Highlight: {todayHighlightsCount} / 1
             </span>
+
             <span
               className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-all ${
-                shareDone ? "bg-primary text-primary-foreground scale-100" : "bg-secondary text-muted-foreground"
+                shareDone ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground"
               }`}
             >
               {shareDone ? <Check className="h-3 w-3" /> : <Share2 className="h-3 w-3" />}
@@ -101,6 +123,6 @@ export function TodayMissionCard({ state, onFindHighlight, onShareHighlight }: T
           </button>
         </div>
       </div>
-    </div>
+    </ShineBorder>
   )
 }

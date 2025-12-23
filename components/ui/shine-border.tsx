@@ -34,11 +34,7 @@ export function ShineBorder({
           }, transparent, transparent)`,
         } as React.CSSProperties
       }
-      className={cn(
-        "relative w-full overflow-visible rounded-[var(--border-radius)] bg-card", 
-        // ❗ bg-card 제거됨
-        className,
-      )}
+      className={cn("relative w-full overflow-visible rounded-[var(--border-radius)] bg-card", className)}
     >
       {/* border glow layer */}
       <div
@@ -56,9 +52,7 @@ export function ShineBorder({
       />
 
       {/* children */}
-      <div className="relative z-10 rounded-[var(--border-radius)]">
-        {children}
-      </div>
+      <div className="relative z-10 rounded-[var(--border-radius)]">{children}</div>
     </div>
   )
 }
