@@ -1,56 +1,24 @@
 "use client"
 
-import type React from "react"
-import { useEffect, useMemo, useRef, useState, useCallback } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { emailDetailHref } from "@/lib/email-href"
 import { cn } from "@/lib/utils"
-import { MessageCircle, Megaphone, Grid3X3, LayoutList } from "lucide-react"
+import { Grid3X3, LayoutList, Mail } from "lucide-react"
 
-// --- Types ---
-type Reaction = { emoji: string; count: number }
-type Comment = {
+// ---- Types ----
+type InboxEmailRow = {
   id: string
-  authorId?: string
-  authorName: string
-  authorAvatarColor?: string
-  text: string
-  createdAt: string
-  totalReactions?: number
-  reactions?: Reaction[]
-}
-
-type TopicFeedItem = {
-  id: string
-  emailId: string
-  circleId: string
-  circleName: string
-  topic: string
-  newsletterTitle: string
-  senderName: string
-  comments: Comment[]
-  totalComments: number
-  totalReactions: number
-  sharedAt?: string
-}
-
-type FeedApiRow = {
-  circle_id: string
-  circle_name: string
-  email_id: string
-  shared_at: string
-  subject: string | null
   from_address: string | null
-  latest_comments: any // jsonb
-  total_comments: number
-  total_reactions: number
+  subject: string | null
+  received_at: string | null
 }
 
-type ApiFeedResponse =
-  | { ok: true; items: FeedApiRow[]; nextCursor?: string | null }
+type ApiInboxListResponse =
+  | { ok: true; items: InboxEmailRow[]; nextCursor?: string | null }
   | { ok: false; error?: string }
 
-// --- Helpers ---
+// ---- Helpers ----
 async function safeReadJson<T>(res: Response): Promise<T> {
   const text = await res.text()
   try {
@@ -67,327 +35,185 @@ function extractNameFromEmail(addr: string) {
   return name || email
 }
 
-function avatarColorFromUserId(userId?: string | null) {
-  if (!userId) return "#64748b"
-  let hash = 0
-  for (let i = 0; i < userId.length; i++) hash = (hash * 31 + userId.charCodeAt(i)) >>> 0
-  const hue = hash % 360
-  return `hsl(${hue} 70% 45%)`
+function formatTime(iso: string | null) {
+  if (!iso) return ""
+  const d = new Date(iso)
+  return d.toLocaleString()
 }
 
-// --- Components ---
-function TopicChip({ topic }: { topic: string }) {
-  return (
-    <span className="inline-block rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground">
-      {topic}
-    </span>
-  )
-}
-
-function Avatar({ name, color }: { name: string; color: string }) {
-  return (
-    <div
-      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold text-white"
-      style={{ backgroundColor: color }}
-    >
-      {name.charAt(0).toUpperCase()}
-    </div>
-  )
-}
-
-function CommentBubble({ comment }: { comment: Comment }) {
-  return (
-    <div className="flex gap-2">
-      <Avatar name={comment.authorName} color={comment.authorAvatarColor ?? "#64748b"} />
-      <div className="flex-1 min-w-0">
-        <div className="rounded-2xl rounded-tl-sm bg-secondary/60 px-3 py-2">
-          <div className="flex items-center gap-2 mb-0.5">
-            <span className="text-xs font-semibold text-foreground">{comment.authorName}</span>
-            <span className="text-[10px] text-muted-foreground">{new Date(comment.createdAt).toLocaleString()}</span>
-          </div>
-          <p className="text-sm text-foreground/90 leading-relaxed">{comment.text}</p>
-        </div>
-        {(comment.totalReactions ?? 0) > 0 && (
-          <div className="mt-1 ml-1 text-[10px] text-muted-foreground">
-            {comment.totalReactions} reactions
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function FeedCardComponent({
-  item,
-  onOpenEmail,
-}: { item: TopicFeedItem; onOpenEmail: () => void }) {
-  return (
-    <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md">
-      <div className="flex items-start justify-between gap-2 mb-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <TopicChip topic={item.topic} />
-            <span className="text-xs text-muted-foreground">in {item.circleName}</span>
-            {item.sharedAt ? (
-              <span className="ml-auto text-[10px] text-muted-foreground">
-                {new Date(item.sharedAt).toLocaleString()}
-              </span>
-            ) : null}
-          </div>
-          <h3 className="mt-2 text-base font-semibold leading-snug text-foreground line-clamp-2">
-            {item.newsletterTitle}
-          </h3>
-          <p className="mt-0.5 text-xs text-muted-foreground">from {item.senderName}</p>
-        </div>
-      </div>
-
-      <div className="space-y-3">
-        {item.comments.map((comment) => (
-          <CommentBubble key={comment.id} comment={comment} />
-        ))}
-      </div>
-
-      <div className="mt-3 flex items-center justify-between border-t border-border/50 pt-3">
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="flex items-center gap-1">
-            <MessageCircle className="h-3.5 w-3.5" />
-            {item.totalComments} comments
-          </span>
-          <span>{item.totalReactions} reactions</span>
-        </div>
-        <button onClick={onOpenEmail} className="text-xs font-medium text-primary hover:underline">
-          Open email
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// --- Main Page ---
-type TabType = "feed" | "ads"
+// ---- UI ----
 type LayoutMode = "list" | "grid"
 
-function MasonryGrid({ children }: { children: React.ReactNode[] }) {
-  const leftColumn: React.ReactNode[] = []
-  const rightColumn: React.ReactNode[] = []
-  children.forEach((child, index) => (index % 2 === 0 ? leftColumn.push(child) : rightColumn.push(child)))
+function EmailCard({
+  item,
+  onOpen,
+  layout,
+}: {
+  item: InboxEmailRow
+  onOpen: () => void
+  layout: LayoutMode
+}) {
+  const from = item.from_address ?? "Unknown"
+  const sender = extractNameFromEmail(from)
+  const subject = item.subject ?? "(no subject)"
+  const time = formatTime(item.received_at)
+
   return (
-    <div className="flex gap-3">
-      <div className="flex-1 flex flex-col gap-3">{leftColumn}</div>
-      <div className="flex-1 flex flex-col gap-3">{rightColumn}</div>
-    </div>
+    <button
+      onClick={onOpen}
+      className={cn(
+        "w-full rounded-2xl bg-card p-4 text-left shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md",
+        layout === "grid" && "min-h-[120px]"
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-secondary text-secondary-foreground">
+          <Mail className="h-4 w-4" />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold text-foreground">{sender}</div>
+              <div className="mt-0.5 line-clamp-2 text-sm text-foreground/80">{subject}</div>
+            </div>
+            {time ? <div className="shrink-0 text-[10px] text-muted-foreground">{time}</div> : null}
+          </div>
+        </div>
+      </div>
+    </button>
   )
 }
 
-export default function TopicsPage() {
+export default function InboxPage() {
   const router = useRouter()
-  const [activeTab, setActiveTab] = useState<TabType>("feed")
-  const [layout, setLayout] = useState<LayoutMode>("list")
 
+  const [layout, setLayout] = useState<LayoutMode>("list")
   const [loading, setLoading] = useState(true)
-  const [loadingMore, setLoadingMore] = useState(false)
-  const [items, setItems] = useState<TopicFeedItem[]>([])
+  const [items, setItems] = useState<InboxEmailRow[]>([])
   const [error, setError] = useState<string | null>(null)
 
-  const [cursor, setCursor] = useState<string | null>(null)
-  const [hasMore, setHasMore] = useState(true)
-
-  const sentinelRef = useRef<HTMLDivElement | null>(null)
-
-  const mapRows = useCallback((rows: FeedApiRow[]) => {
-    return (rows ?? []).map((row) => {
-      const latest: Comment[] = Array.isArray(row.latest_comments)
-        ? row.latest_comments.map((c: any) => ({
-            id: c.id,
-            authorId: c.authorId,
-            authorName: c.authorName ?? "Unknown",
-            authorAvatarColor: avatarColorFromUserId(c.authorId),
-            text: c.text ?? "",
-            createdAt: c.createdAt,
-            totalReactions: c.totalReactions ?? 0,
-          }))
-        : []
-
-      const senderName = extractNameFromEmail(row.from_address ?? "Unknown")
-      return {
-        id: `feed-${row.circle_id}-${row.email_id}`,
-        emailId: row.email_id,
-        circleId: row.circle_id,
-        circleName: row.circle_name ?? "Circle",
-        topic: "Today in your circles",
-        newsletterTitle: row.subject ?? "(no subject)",
-        senderName,
-        comments: latest,
-        totalComments: row.total_comments ?? 0,
-        totalReactions: row.total_reactions ?? 0,
-        sharedAt: row.shared_at,
-      }
+  // (Optional) 간단 검색
+  const [q, setQ] = useState("")
+  const filtered = useMemo(() => {
+    const qq = q.trim().toLowerCase()
+    if (!qq) return items
+    return items.filter((it) => {
+      const from = (it.from_address ?? "").toLowerCase()
+      const subject = (it.subject ?? "").toLowerCase()
+      return from.includes(qq) || subject.includes(qq)
     })
-  }, [])
+  }, [items, q])
 
-  const loadPage = useCallback(
-    async (nextCursor: string | null) => {
-      const isFirst = nextCursor == null
+  useEffect(() => {
+    let cancelled = false
+    async function load() {
       try {
-        if (isFirst) {
-          setLoading(true)
-          setError(null)
-        } else {
-          setLoadingMore(true)
-        }
+        setLoading(true)
+        setError(null)
 
-        const qs = new URLSearchParams()
-        qs.set("limit", "20")
-        if (nextCursor) qs.set("cursor", nextCursor)
-
-        const res = await fetch(`/api/circles/feed?${qs.toString()}`, {
+        // ✅ 여기서 "내 inbox 메일 목록" API를 호출해야 함
+        // 프로젝트에 이미 존재하는 리스트 API 경로에 맞춰 사용해줘.
+        const res = await fetch(`/api/inbox-emails?limit=50`, {
           cache: "no-store",
           credentials: "include",
         })
-        const data = await safeReadJson<ApiFeedResponse>(res)
+        const data = await safeReadJson<ApiInboxListResponse>(res)
+        if (cancelled) return
 
         if (!data.ok) {
-          if (isFirst) setItems([])
-          setError(data.error ?? "Failed to load feed")
-          setHasMore(false)
+          setItems([])
+          setError(data.error ?? "Failed to load inbox")
+          setLoading(false)
           return
         }
 
-        const mapped = mapRows(data.items ?? [])
-
-        setItems((prev) => (isFirst ? mapped : [...prev, ...mapped]))
-        const nc = data.nextCursor ?? null
-        setCursor(nc)
-        setHasMore(Boolean(nc) && mapped.length > 0)
-      } catch (e: any) {
-        if (isFirst) setItems([])
-        setError(e?.message ?? "Failed to load feed")
-        setHasMore(false)
-      } finally {
+        setItems(data.items ?? [])
         setLoading(false)
-        setLoadingMore(false)
+      } catch (e: any) {
+        if (cancelled) return
+        setItems([])
+        setError(e?.message ?? "Failed to load inbox")
+        setLoading(false)
       }
-    },
-    [mapRows]
-  )
+    }
+    load()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
-  useEffect(() => {
-    loadPage(null)
-  }, [loadPage])
-
-  // infinite scroll
-  useEffect(() => {
-    if (activeTab !== "feed") return
-    const el = sentinelRef.current
-    if (!el) return
-
-    const io = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0]
-        if (!entry?.isIntersecting) return
-        if (loading || loadingMore) return
-        if (!hasMore) return
-        loadPage(cursor)
-      },
-      { root: null, rootMargin: "200px", threshold: 0 }
-    )
-
-    io.observe(el)
-    return () => io.disconnect()
-  }, [activeTab, cursor, hasMore, loadPage, loading, loadingMore])
-
-  const handleOpenEmail = (emailId: string) => {
-    const href = emailDetailHref(emailId)
+  const openEmail = (id: string) => {
+    const href = emailDetailHref(id)
     if (!href) return
     router.push(href)
   }
 
   return (
     <div className="flex min-h-full flex-col">
-      <div className="sticky top-0 z-10 bg-background pt-4 pb-2">
-        <div className="mx-4 flex rounded-xl bg-secondary/50 p-1">
-          <button
-            onClick={() => setActiveTab("feed")}
-            className={cn(
-              "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "feed" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            <MessageCircle className="h-4 w-4" />
-            Feed
-          </button>
-          <button
-            onClick={() => setActiveTab("ads")}
-            className={cn(
-              "flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors",
-              activeTab === "ads" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-            )}
-          >
-            <Megaphone className="h-4 w-4" />
-            Ad Board
-          </button>
-        </div>
+      {/* Top bar */}
+      <div className="sticky top-0 z-10 bg-background pt-4 pb-3">
+        <div className="mx-4 flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-base font-semibold text-foreground">Inbox</div>
+            <div className="text-xs text-muted-foreground">Your emails</div>
+          </div>
 
-        {/* (옵션) 레이아웃 토글 */}
-        {activeTab === "feed" ? (
-          <div className="mx-4 mt-2 flex justify-end gap-2">
+          <div className="flex items-center gap-2">
             <button
               onClick={() => setLayout("list")}
               className={cn(
-                "rounded-lg px-2 py-1 text-xs",
-                layout === "list" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"
+                "rounded-xl p-2 ring-1 ring-border/70",
+                layout === "list" ? "bg-card text-foreground" : "bg-transparent text-muted-foreground"
               )}
+              aria-label="List layout"
             >
               <LayoutList className="h-4 w-4" />
             </button>
             <button
               onClick={() => setLayout("grid")}
               className={cn(
-                "rounded-lg px-2 py-1 text-xs",
-                layout === "grid" ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"
+                "rounded-xl p-2 ring-1 ring-border/70",
+                layout === "grid" ? "bg-card text-foreground" : "bg-transparent text-muted-foreground"
               )}
+              aria-label="Grid layout"
             >
               <Grid3X3 className="h-4 w-4" />
             </button>
           </div>
-        ) : null}
+        </div>
+
+        <div className="mx-4 mt-3">
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search sender or subject…"
+            className="w-full rounded-xl bg-secondary px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/50"
+          />
+        </div>
       </div>
 
+      {/* Content */}
       <div className="flex-1 px-4 pb-24">
-        {activeTab !== "feed" ? (
-          <div className="text-sm text-muted-foreground">Ads 탭은 다음 단계에서 연결.</div>
-        ) : loading ? (
+        {loading ? (
           <div className="text-sm text-muted-foreground">Loading…</div>
         ) : error ? (
           <div className="text-sm text-destructive">{error}</div>
-        ) : items.length === 0 ? (
-          <div className="text-sm text-muted-foreground">No feed yet. Share a newsletter to a circle.</div>
+        ) : filtered.length === 0 ? (
+          <div className="text-sm text-muted-foreground">No emails.</div>
         ) : layout === "list" ? (
-          <div className="space-y-4">
-            {items.map((item) => (
-              <FeedCardComponent key={item.id} item={item} onOpenEmail={() => handleOpenEmail(item.emailId)} />
+          <div className="space-y-3">
+            {filtered.map((it) => (
+              <EmailCard key={it.id} item={it} layout={layout} onOpen={() => openEmail(it.id)} />
             ))}
           </div>
         ) : (
-          <MasonryGrid>
-            {items.map((item) => (
-              <FeedCardComponent key={item.id} item={item} onOpenEmail={() => handleOpenEmail(item.emailId)} />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {filtered.map((it) => (
+              <EmailCard key={it.id} item={it} layout={layout} onOpen={() => openEmail(it.id)} />
             ))}
-          </MasonryGrid>
-        )}
-
-        {/* sentinel */}
-        {activeTab === "feed" ? (
-          <div ref={sentinelRef} className="py-6">
-            {loadingMore ? (
-              <div className="text-xs text-muted-foreground">Loading more…</div>
-            ) : hasMore ? (
-              <div className="text-xs text-muted-foreground">Scroll to load more</div>
-            ) : (
-              <div className="text-xs text-muted-foreground">You’re all caught up</div>
-            )}
           </div>
-        ) : null}
+        )}
       </div>
     </div>
   )

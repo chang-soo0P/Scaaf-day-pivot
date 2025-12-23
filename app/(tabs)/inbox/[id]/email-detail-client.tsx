@@ -1147,8 +1147,8 @@ export default function EmailDetailClient({
             setHighlightToShare(null)
             setShareTarget(null)
 
-            // 지금은 feed 확인 UX가 중요해서 topics로 보내는 게 체감이 좋아.
-            router.push("/topics")
+            // ✅ 공유 후 현재 상세 페이지 유지(탭 라우팅 혼동 방지)
+            router.refresh()
           }}
           className={cn(
             "w-full rounded-xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80",
