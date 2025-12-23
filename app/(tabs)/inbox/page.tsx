@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useMemo, useRef, useState } from "react"
-import Link from "next/link"
+import { useRouter } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { emailDetailHref } from "@/lib/email-href"
 import {
@@ -28,8 +28,8 @@ import { useToast } from "@/hooks/use-toast"
 type TabType = "byTopics" | "all"
 type LayoutMode = "stack" | "grid" | "list"
 
-type Reaction = { emoji: string; count: number }
-type Comment = { reactions: Reaction[] }
+type EmailReaction = { emoji: string; count: number }
+type EmailComment = { reactions?: EmailReaction[] }
 
 type Email = {
   id: string
@@ -42,7 +42,7 @@ type Email = {
   hasAdSegment?: boolean
   topics: string[]
   highlights: any[]
-  comments: Comment[]
+  comments: EmailComment[]
 }
 
 type TopicInfo = {
@@ -66,6 +66,9 @@ type InboxEmailRow = {
   address_id: string | null
   raw: any
 }
+
+const EMPTY_COMMENTS: EmailComment[] = []
+const EMPTY_HIGHLIGHTS: any[] = []
 
 // --- helpers ---
 function safeDomain(from: string) {
@@ -125,7 +128,6 @@ function useInboxEmails(limit = 200, pollMs = 5000) {
     })
 
     if (!res) return
-
     const json = await res.json()
 
     if (!res.ok) {
@@ -167,7 +169,6 @@ function useInboxEmails(limit = 200, pollMs = 5000) {
     }).length
 
     setNewCount(cnt)
-
     if (cnt > 0 && topKey) pendingToastKeyRef.current = topKey
   }
 
@@ -225,8 +226,8 @@ function rowsToUiEmails(rows: InboxEmailRow[]): Email[] {
       issueImageEmoji: emojiForKey(domain),
       hasAdSegment: false,
       topics: [topic],
-      highlights: [],
-      comments: [],
+      highlights: EMPTY_HIGHLIGHTS,
+      comments: EMPTY_COMMENTS,
     }
   })
 }
@@ -266,6 +267,7 @@ function filterEmailsByTopicId(emails: Email[], topicId: string) {
   return emails.filter((e) => toTopicId(e.topics[0] ?? "other") === topicId)
 }
 
+// --- Layout Icons ---
 const layoutIcons = {
   stack: Layers,
   grid: Grid3X3,
@@ -287,20 +289,21 @@ function IssueCard({
     commentCount: email.comments.length,
   }
 
-  const reactionCounts: Record<string, number> = {}
-  email.comments.forEach((comment) => {
-    comment.reactions.forEach((r) => {
-      reactionCounts[r.emoji] = (reactionCounts[r.emoji] || 0) + r.count
+  // ✅ TS 추론 꼬임(never) 방지: tuple로 계산 + 인덱스 접근만 사용
+  const topReaction = useMemo(() => {
+    const counts: Record<string, number> = {}
+    email.comments.forEach((comment) => {
+      ;(comment.reactions ?? []).forEach((r) => {
+        counts[r.emoji] = (counts[r.emoji] ?? 0) + r.count
+      })
     })
-  })
-  let topReaction: Reaction | null = null
-  let maxCount = 0
-  Object.entries(reactionCounts).forEach(([emoji, count]) => {
-    if (count > maxCount) {
-      maxCount = count
-      topReaction = { emoji, count }
+
+    let best: [string, number] | null = null
+    for (const [emoji, count] of Object.entries(counts)) {
+      if (!best || count > best[1]) best = [emoji, count]
     }
-  })
+    return best
+  }, [email.comments])
 
   return (
     <div
@@ -331,7 +334,7 @@ function IssueCard({
           )}
           {topReaction && (
             <span className="flex items-center gap-0.5">
-              {topReaction.emoji} {topReaction.count}
+              {topReaction[0]} {topReaction[1]}
             </span>
           )}
         </div>
@@ -347,92 +350,49 @@ function IssueCard({
 }
 
 function NewsletterCard({ email, glowNew }: { email: Email; glowNew?: boolean }) {
+  const router = useRouter()
+
   const stats = {
     highlightCount: email.highlights.length,
     commentCount: email.comments.length,
   }
 
-  const reactionCounts: Record<string, number> = {}
-  email.comments.forEach((comment) => {
-    comment.reactions.forEach((r) => {
-      reactionCounts[r.emoji] = (reactionCounts[r.emoji] || 0) + r.count
+  // ✅ 여기도 동일 방식으로 안전하게
+  const topEmoji = useMemo(() => {
+    const counts: Record<string, number> = {}
+    email.comments.forEach((comment) => {
+      ;(comment.reactions ?? []).forEach((r) => {
+        counts[r.emoji] = (counts[r.emoji] ?? 0) + r.count
+      })
     })
-  })
-  let topEmoji: string | null = null
-  let maxCount = 0
-  Object.entries(reactionCounts).forEach(([emoji, count]) => {
-    if (count > maxCount) {
-      maxCount = count
-      topEmoji = emoji
+
+    let best: [string, number] | null = null
+    for (const [emoji, count] of Object.entries(counts)) {
+      if (!best || count > best[1]) best = [emoji, count]
     }
-  })
+    return best ? best[0] : null
+  }, [email.comments])
 
   const href = emailDetailHref(email.id)
 
-  return href ? (
-    <Link href={href}>
-      <div
-        className={cn(
-          "rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 transition-all duration-500 hover:shadow-md",
-          glowNew && "ring-2 ring-primary/35 bg-primary/5 shadow-md",
-        )}
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-muted-foreground">{email.senderName}</p>
-            <h3 className="mt-1 text-sm font-semibold text-foreground line-clamp-2">{email.newsletterTitle}</h3>
-
-            <div className="mt-1.5 flex flex-wrap gap-1">
-              {email.topics.map((topic) => (
-                <span
-                  key={topic}
-                  className="inline-block rounded-full bg-secondary px-2 py-0.5 text-[10px] font-medium text-secondary-foreground"
-                >
-                  {topic}
-                </span>
-              ))}
-            </div>
-
-            <p className="mt-2 text-xs text-muted-foreground line-clamp-2">{email.snippet}</p>
-          </div>
-
-          {email.issueImageEmoji && (
-            <div className="relative h-14 w-14 shrink-0 rounded-xl bg-gradient-to-br from-secondary to-secondary/50 flex items-center justify-center">
-              <span className="text-xl">{email.issueImageEmoji}</span>
-            </div>
-          )}
-        </div>
-
-        <div className="mt-3 flex items-center gap-3 text-[10px] text-muted-foreground">
-          <span>{email.receivedAt}</span>
-
-          {glowNew && (
-            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">NEW</span>
-          )}
-
-          {stats.highlightCount > 0 && (
-            <span className="flex items-center gap-0.5">
-              <Highlighter className="h-3 w-3" /> {stats.highlightCount}
-            </span>
-          )}
-          {stats.commentCount > 0 && (
-            <span className="flex items-center gap-0.5">
-              <MessageCircle className="h-3 w-3" /> {stats.commentCount}
-            </span>
-          )}
-          {topEmoji && <span>{topEmoji}</span>}
-          {email.hasAdSegment && (
-            <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">Ad</span>
-          )}
-        </div>
-      </div>
-    </Link>
-  ) : (
-    <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 opacity-60 cursor-not-allowed">
+  return (
+    <div
+      onClick={() => {
+        if (href) router.push(href)
+      }}
+      className={cn(
+        "rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/60 transition-all duration-500 hover:shadow-md",
+        glowNew && "ring-2 ring-primary/35 bg-primary/5 shadow-md",
+        !href && "opacity-60 cursor-not-allowed",
+      )}
+      role="button"
+      tabIndex={0}
+    >
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <p className="text-xs font-medium text-muted-foreground">{email.senderName}</p>
           <h3 className="mt-1 text-sm font-semibold text-foreground line-clamp-2">{email.newsletterTitle}</h3>
+
           <div className="mt-1.5 flex flex-wrap gap-1">
             {email.topics.map((topic) => (
               <span
@@ -443,14 +403,46 @@ function NewsletterCard({ email, glowNew }: { email: Email; glowNew?: boolean })
               </span>
             ))}
           </div>
+
           <p className="mt-2 text-xs text-muted-foreground line-clamp-2">{email.snippet}</p>
         </div>
+
+        {email.issueImageEmoji && (
+          <div className="relative h-14 w-14 shrink-0 rounded-xl bg-gradient-to-br from-secondary to-secondary/50 flex items-center justify-center">
+            <span className="text-xl">{email.issueImageEmoji}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 flex items-center gap-3 text-[10px] text-muted-foreground">
+        <span>{email.receivedAt}</span>
+
+        {glowNew && (
+          <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">NEW</span>
+        )}
+
+        {stats.highlightCount > 0 && (
+          <span className="flex items-center gap-0.5">
+            <Highlighter className="h-3 w-3" /> {stats.highlightCount}
+          </span>
+        )}
+        {stats.commentCount > 0 && (
+          <span className="flex items-center gap-0.5">
+            <MessageCircle className="h-3 w-3" /> {stats.commentCount}
+          </span>
+        )}
+        {topEmoji && <span>{topEmoji}</span>}
+        {email.hasAdSegment && (
+          <span className="rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600">Ad</span>
+        )}
       </div>
     </div>
   )
 }
 
 function TopicDetailView({ topic, emails, onBack }: { topic: TopicInfo; emails: Email[]; onBack: () => void }) {
+  const router = useRouter()
+
   return (
     <div className="flex flex-col min-h-full">
       <div className="sticky top-0 z-10 bg-background pt-4 pb-2 px-4">
@@ -509,10 +501,7 @@ function TopicDetailView({ topic, emails, onBack }: { topic: TopicInfo; emails: 
             {emails.map((email) => (
               <div
                 key={email.id}
-                onClick={() => {
-                  const href = emailDetailHref(email.id) || `/inbox/${email.id}`
-                  window.location.href = href
-                }}
+                onClick={() => router.push(`/inbox/${email.id}`)}
                 className="flex items-center gap-3 rounded-xl bg-card p-3 shadow-sm ring-1 ring-border/60 cursor-pointer hover:shadow-md transition-shadow"
               >
                 {email.issueImageEmoji && (
@@ -637,7 +626,7 @@ function TodaysDigestCard({ onOpenToday }: { onOpenToday: () => void }) {
           <CalendarDays className="h-5 w-5 text-primary" />
         </div>
         <div className="flex-1">
-          <h3 className="text-sm font-semibold text-foreground">Today's Digest</h3>
+          <h3 className="text-sm font-semibold text-foreground">Today&apos;s Digest</h3>
           <p className="text-xs text-muted-foreground mt-0.5">This will become a real daily summary later.</p>
         </div>
       </div>
@@ -949,7 +938,11 @@ export default function InboxPage() {
             {hasAnyNew && (
               <div className="flex items-center justify-between gap-2">
                 <div className="text-xs text-muted-foreground">
-                  {effectiveNewIdsSet.size > 0 ? `New: ${effectiveNewIdsSet.size}` : newCount > 0 ? `New: ${newCount}` : "New"}
+                  {effectiveNewIdsSet.size > 0
+                    ? `New: ${effectiveNewIdsSet.size}`
+                    : newCount > 0
+                      ? `New: ${newCount}`
+                      : "New"}
                 </div>
 
                 <button
@@ -982,7 +975,7 @@ export default function InboxPage() {
                 <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10">
                   <Mail className="h-4 w-4 text-primary" />
                 </span>
-                {newCount} new email{newCount > 1 ? "s" : ""} arrived — jump to top
+                New {newCount} email{newCount > 1 ? "s" : ""} — jump to top
               </button>
             )}
 
@@ -992,7 +985,9 @@ export default function InboxPage() {
                   <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-secondary">
                     <Mail className="h-5 w-5" />
                   </div>
-                  {newOnly ? "No NEW emails to show." : "No emails found yet. Send a newsletter to your @mg.scaaf.day address."}
+                  {newOnly
+                    ? "No NEW emails to show."
+                    : "No emails found yet. Send a newsletter to your @mg.scaaf.day address."}
                 </div>
               </div>
             ) : (
