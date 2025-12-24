@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
 import {
   ArrowLeft,
   Highlighter,
@@ -20,6 +20,8 @@ import { cn } from "@/lib/utils"
 import { motion, AnimatePresence } from "framer-motion"
 import { ShineBorder } from "@/components/ui/shine-border"
 import { FloatingHighlightBar } from "@/components/floating-highlight-bar"
+import { useDailyMission } from "@/hooks/use-daily-mission"
+import { useToast } from "@/hooks/use-toast"
 
 /** -----------------------------
  * Types
@@ -219,6 +221,11 @@ export default function EmailDetailClient({
   initialComments = [],
 }: EmailDetailClientProps) {
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const { toast } = useToast()
+
+  // ✅ Daily mission
+  const { incrementHighlights, incrementCircleShares } = useDailyMission()
 
   const isValidEmailId = isValidEmailIdValue(emailId) && isUuid(emailId)
 
@@ -348,6 +355,31 @@ export default function EmailDetailClient({
   // ✅ (NEW) reaction picker: hover 대신 click 토글
   const [openReactionFor, setOpenReactionFor] = useState<string | null>(null)
   const reactionPopoverRef = useRef<HTMLDivElement | null>(null)
+
+  // ✅ query param UX (share=1 / highlight=1) — StrictMode guard
+  const deepLinkHandledRef = useRef(false)
+  useEffect(() => {
+    if (deepLinkHandledRef.current) return
+    deepLinkHandledRef.current = true
+
+    const wantsShare = searchParams?.get("share") === "1"
+    const wantsHighlight = searchParams?.get("highlight") === "1"
+
+    if (wantsShare) {
+      setShareTarget({ type: "email" })
+      setHighlightToShare(null)
+      setShowShareModal(true)
+      return
+    }
+
+    if (wantsHighlight) {
+      setIsOriginalExpanded(true)
+      toast({
+        title: "Pick a line to highlight",
+        description: "원문에서 텍스트를 드래그하면 하이라이트/공유 바가 떠.",
+      })
+    }
+  }, [searchParams, toast])
 
   // 바깥 클릭/ESC로 닫기
   useEffect(() => {
@@ -590,6 +622,10 @@ export default function EmailDetailClient({
       if (!data.ok) throw new Error(data.error ?? "Failed to create highlight")
 
       setHighlights((prev) => prev.map((h) => (h.id === optimistic.id ? data.highlight : h)))
+
+      // ✅ Daily mission: highlight +1 (서버 생성 성공시에만)
+      incrementHighlights()
+
       return data.highlight
     } catch {
       setHighlights((prev) => prev.filter((h) => h.id !== optimistic.id))
@@ -743,9 +779,7 @@ export default function EmailDetailClient({
       const data = await safeReadJson<ApiReactionToggleResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to toggle reaction")
 
-      setComments((cur) =>
-        cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c))
-      )
+      setComments((cur) => cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c)))
     } catch {
       setComments(prev)
     }
@@ -1085,8 +1119,8 @@ export default function EmailDetailClient({
               onClick={(e) => e.stopPropagation()}
               className={cn(
                 "w-full max-w-md rounded-2xl bg-card p-4",
-                "max-h-[85vh] overflow-hidden",            // ✅ sheet 자체 높이 제한
-                "pb-[calc(env(safe-area-inset-bottom)+96px)]" // ✅ safe-area + 탭바(대략 72~96px) 회피
+                "max-h-[85vh] overflow-hidden",
+                "pb-[calc(env(safe-area-inset-bottom)+96px)]"
               )}
             >
               <div className="flex items-center justify-between mb-4">
@@ -1108,60 +1142,63 @@ export default function EmailDetailClient({
                 </div>
               )}
 
-{/* circles list */}
-{circlesLoading ? (
-  <div className="py-6 text-sm text-muted-foreground">Loading circles…</div>
-) : circlesError ? (
-  <div className="py-4 text-sm text-destructive">{circlesError}</div>
-) : circles.length === 0 ? (
-  <div className="py-4 text-sm text-muted-foreground">
-    No circles yet. Create or join a circle first.
-  </div>
-) : (
-  // ✅ scroll container
-  <div className="max-h-[50vh] overflow-y-auto pr-1 -mr-1">
-    <div className="space-y-2">
-      {circles.map((c) => (
-        <button
-          key={c.id}
-          disabled={sharing}
-          onClick={async () => {
-            // 1) 이메일을 feed로 공유 (circle_emails insert)
-            const r = await shareEmailToCircle(c.id)
-            if (!r.ok) {
-              alert(r.error ?? "Share failed")
-              return
-            }
+              {/* circles list */}
+              {circlesLoading ? (
+                <div className="py-6 text-sm text-muted-foreground">Loading circles…</div>
+              ) : circlesError ? (
+                <div className="py-4 text-sm text-destructive">{circlesError}</div>
+              ) : circles.length === 0 ? (
+                <div className="py-4 text-sm text-muted-foreground">No circles yet. Create or join a circle first.</div>
+              ) : (
+                <div className="max-h-[50vh] overflow-y-auto pr-1 -mr-1">
+                  <div className="space-y-2">
+                    {circles.map((c) => (
+                      <button
+                        key={c.id}
+                        disabled={sharing}
+                        onClick={async () => {
+                          // 1) 이메일을 feed로 공유 (circle_emails insert)
+                          const r = await shareEmailToCircle(c.id)
+                          if (!r.ok) {
+                            alert(r.error ?? "Share failed")
+                            return
+                          }
 
-            // 2) 하이라이트 공유 모드면 기존 기능도 유지
-            if (shareTarget?.type === "highlight" && highlightToShare?.quote) {
-              if (!highlightToShare.id) {
-                const created = await createHighlight(highlightToShare.quote)
-                if (created) await markHighlightShared(created.id)
-              } else {
-                await markHighlightShared(highlightToShare.id)
-              }
-            }
+                          if (r.duplicated) {
+                            toast({ title: "Already shared", description: "이미 이 Circle에 공유된 이메일이야." })
+                          } else {
+                            // ✅ Daily mission: share +1 (중복이 아닐 때만)
+                            incrementCircleShares()
+                          }
 
-            setShowShareModal(false)
-            setHighlightToShare(null)
-            setShareTarget(null)
+                          // 2) 하이라이트 공유 모드면 기존 기능도 유지
+                          if (shareTarget?.type === "highlight" && highlightToShare?.quote) {
+                            if (!highlightToShare.id) {
+                              const created = await createHighlight(highlightToShare.quote)
+                              if (created) await markHighlightShared(created.id)
+                            } else {
+                              await markHighlightShared(highlightToShare.id)
+                            }
+                          }
 
-            // ✅ 공유 후 현재 상세 페이지 유지(탭 라우팅 혼동 방지)
-            router.refresh()
-          }}
-          className={cn(
-            "w-full rounded-xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80",
-            sharing && "opacity-60 cursor-not-allowed"
-          )}
-        >
-          {c.name ?? `Circle ${c.id.slice(0, 6)}`}
-        </button>
-      ))}
-    </div>
-  </div>
-)}
+                          setShowShareModal(false)
+                          setHighlightToShare(null)
+                          setShareTarget(null)
 
+                          // ✅ 공유 후 현재 상세 페이지 유지(탭 라우팅 혼동 방지)
+                          router.refresh()
+                        }}
+                        className={cn(
+                          "w-full rounded-xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80",
+                          sharing && "opacity-60 cursor-not-allowed"
+                        )}
+                      >
+                        {c.name ?? `Circle ${c.id.slice(0, 6)}`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}
@@ -1196,6 +1233,13 @@ export default function EmailDetailClient({
                   onClick={() => {
                     setShowCreateOptions(false)
                     if (selectedText) handleHighlight()
+                    else {
+                      toast({
+                        title: "Select text first",
+                        description: "원문에서 텍스트를 드래그한 다음 하이라이트를 눌러줘.",
+                      })
+                      setIsOriginalExpanded(true)
+                    }
                   }}
                   className="flex w-full items-center gap-3 rounded-xl bg-secondary p-3 text-left hover:bg-secondary/80"
                 >
