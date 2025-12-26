@@ -10,10 +10,17 @@ export interface DailyMissionState {
   todayCircleSharesCount: number
   status: MissionStatus
   hasShownCompletionToast: boolean
+
+  /**
+   * ✅ 중복 방지용 키 목록
+   * - highlightKeys: 같은 날, 같은 이메일에서 여러 번 하이라이트 생성해도 1회만 인정
+   * - shareKeys: 같은 날, 같은 이메일을 여러 번 공유해도 1회만 인정
+   */
+  highlightKeys: string[]
+  shareKeys: string[]
 }
 
 const STORAGE_KEY = "scaaf-daily-mission"
-const EVENT_NAME = "scaaf-daily-mission:update"
 
 function getDateKey(): string {
   const now = new Date()
@@ -26,174 +33,174 @@ function computeStatus(highlights: number, shares: number): MissionStatus {
   return "in_progress"
 }
 
-function safeParse(v: string | null): DailyMissionState | null {
-  if (!v) return null
-  try {
-    return JSON.parse(v) as DailyMissionState
-  } catch {
-    return null
-  }
+function isUuid(v: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
 }
 
-function freshStateForToday(today: string): DailyMissionState {
-  return {
-    dateKey: today,
-    todayHighlightsCount: 0,
-    todayCircleSharesCount: 0,
-    status: "not_started",
-    hasShownCompletionToast: false,
-  }
+/**
+ * 현재 URL에서 /inbox/{uuid} 형태의 emailId를 최대한 추출
+ * (기존 호출부를 바꾸지 않아도 이메일 단위 dedupe가 되게 하기 위함)
+ */
+function inferEmailIdFromPath(): string | null {
+  if (typeof window === "undefined") return null
+  const path = window.location?.pathname ?? ""
+  const m = path.match(/\/inbox\/([0-9a-f-]{36})/i)
+  const id = m?.[1]
+  if (id && isUuid(id)) return id
+  return null
 }
 
-function normalizeToToday(state: DailyMissionState, today: string): DailyMissionState {
-  if (state.dateKey === today) return state
-  return freshStateForToday(today)
+function normalizeArray(v: any): string[] {
+  return Array.isArray(v) ? v.filter((x) => typeof x === "string") : []
 }
 
 function getInitialState(): DailyMissionState {
   const today = getDateKey()
 
-  if (typeof window === "undefined") return freshStateForToday(today)
+  const base: DailyMissionState = {
+    dateKey: today,
+    todayHighlightsCount: 0,
+    todayCircleSharesCount: 0,
+    status: "not_started",
+    hasShownCompletionToast: false,
+    highlightKeys: [],
+    shareKeys: [],
+  }
 
-  const parsed = safeParse(localStorage.getItem(STORAGE_KEY))
-  if (parsed) return normalizeToToday(parsed, today)
-  return freshStateForToday(today)
-}
+  if (typeof window === "undefined") return base
 
-function writeState(next: DailyMissionState) {
-  if (typeof window === "undefined") return
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
-  // 같은 탭/SPA에서도 즉시 반영되도록 커스텀 이벤트
-  window.dispatchEvent(new Event(EVENT_NAME))
-}
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (stored) {
+      const parsed = JSON.parse(stored) as Partial<DailyMissionState>
 
-/**
- * ✅ 다른 페이지(이메일 상세 등)에서 “오늘 하이라이트 1 증가” 처리를 쉽게 하기 위한 helper
- * 사용 예:
- *   import { bumpDailyMissionHighlights } from "@/hooks/use-daily-mission"
- *   bumpDailyMissionHighlights()
- */
-export function bumpDailyMissionHighlights(delta: number = 1) {
-  if (typeof window === "undefined") return
-  const today = getDateKey()
-  const current = safeParse(localStorage.getItem(STORAGE_KEY)) ?? freshStateForToday(today)
-  const normalized = normalizeToToday(current, today)
+      // 같은 날이면 마이그레이션 + 복구
+      if (parsed?.dateKey === today) {
+        const highlights = Number(parsed.todayHighlightsCount ?? 0) || 0
+        const shares = Number(parsed.todayCircleSharesCount ?? 0) || 0
 
-  const nextHighlights = Math.max(0, normalized.todayHighlightsCount + delta)
-  const nextStatus = computeStatus(nextHighlights, normalized.todayCircleSharesCount)
+        const migrated: DailyMissionState = {
+          dateKey: today,
+          todayHighlightsCount: highlights,
+          todayCircleSharesCount: shares,
+          status: (parsed.status as MissionStatus) ?? computeStatus(highlights, shares),
+          hasShownCompletionToast: Boolean(parsed.hasShownCompletionToast ?? false),
+          highlightKeys: normalizeArray((parsed as any).highlightKeys),
+          shareKeys: normalizeArray((parsed as any).shareKeys),
+        }
 
-  writeState({
-    ...normalized,
-    todayHighlightsCount: nextHighlights,
-    status: nextStatus,
-  })
-}
+        // status가 이상하면 재계산
+        migrated.status = computeStatus(migrated.todayHighlightsCount, migrated.todayCircleSharesCount)
 
-/**
- * ✅ 다른 페이지에서 “오늘 Circle Share 1 증가” 처리 helper
- */
-export function bumpDailyMissionCircleShares(delta: number = 1) {
-  if (typeof window === "undefined") return
-  const today = getDateKey()
-  const current = safeParse(localStorage.getItem(STORAGE_KEY)) ?? freshStateForToday(today)
-  const normalized = normalizeToToday(current, today)
+        return migrated
+      }
+    }
+  } catch {
+    // ignore
+  }
 
-  const nextShares = Math.max(0, normalized.todayCircleSharesCount + delta)
-  const nextStatus = computeStatus(normalized.todayHighlightsCount, nextShares)
-
-  writeState({
-    ...normalized,
-    todayCircleSharesCount: nextShares,
-    status: nextStatus,
-  })
+  // 새로운 날이면 리셋
+  return base
 }
 
 export function useDailyMission() {
   const [state, setState] = useState<DailyMissionState>(getInitialState)
 
-  // localStorage 변경(다른 페이지/다른 탭) 반영
+  // Persist
   useEffect(() => {
-    if (typeof window === "undefined") return
-
-    const syncFromStorage = () => {
-      const today = getDateKey()
-      const parsed = safeParse(localStorage.getItem(STORAGE_KEY))
-      const next = normalizeToToday(parsed ?? freshStateForToday(today), today)
-      setState(next)
+    if (typeof window !== "undefined") {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
     }
-
-    const onStorage = (e: StorageEvent) => {
-      if (e.key !== STORAGE_KEY) return
-      syncFromStorage()
-    }
-
-    const onCustom = () => syncFromStorage()
-
-    window.addEventListener("storage", onStorage)
-    window.addEventListener(EVENT_NAME, onCustom)
-
-    // mount 시 1회 동기화
-    syncFromStorage()
-
-    return () => {
-      window.removeEventListener("storage", onStorage)
-      window.removeEventListener(EVENT_NAME, onCustom)
-    }
-  }, [])
-
-  // 날짜 변경 체크 (자정 넘어가면 리셋)
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const today = getDateKey()
-      setState((prev) => {
-        if (prev.dateKey === today) return prev
-        const next = freshStateForToday(today)
-        writeState(next)
-        return next
-      })
-    }, 60000)
-
-    return () => clearInterval(interval)
-  }, [])
-
-  // Persist (이 훅을 통해 바꿀 때도 localStorage 동기화)
-  useEffect(() => {
-    if (typeof window === "undefined") return
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
   }, [state])
 
-  const incrementHighlights = useCallback(() => {
-    setState((prev) => {
+  // Day change watcher
+  useEffect(() => {
+    const checkDayChange = () => {
       const today = getDateKey()
-      const normalized = normalizeToToday(prev, today)
-      const nextHighlights = normalized.todayHighlightsCount + 1
-      const nextStatus = computeStatus(nextHighlights, normalized.todayCircleSharesCount)
+      if (state.dateKey !== today) {
+        setState({
+          dateKey: today,
+          todayHighlightsCount: 0,
+          todayCircleSharesCount: 0,
+          status: "not_started",
+          hasShownCompletionToast: false,
+          highlightKeys: [],
+          shareKeys: [],
+        })
+      }
+    }
 
-      const next = { ...normalized, todayHighlightsCount: nextHighlights, status: nextStatus }
-      writeState(next)
-      return next
+    const interval = setInterval(checkDayChange, 60000)
+    return () => clearInterval(interval)
+  }, [state.dateKey])
+
+  /**
+   * ✅ 하이라이트 1회 인정 (이메일 단위 중복 방지)
+   * - 기본: 현재 URL에서 /inbox/{emailId} 추출 → `highlight:email:{emailId}`
+   * - 인자를 주면 그 값을 키로 사용(확장용)
+   */
+  const incrementHighlights = useCallback((key?: string) => {
+    setState((prev) => {
+      const inferredEmailId = inferEmailIdFromPath()
+      const dedupeKey = key?.trim()
+        ? `highlight:${key.trim()}`
+        : inferredEmailId
+          ? `highlight:email:${inferredEmailId}`
+          : "highlight:global"
+
+      if (prev.highlightKeys.includes(dedupeKey)) {
+        return prev // 이미 인정됨
+      }
+
+      const nextHighlights = prev.todayHighlightsCount + 1
+      const nextShare = prev.todayCircleSharesCount
+      const nextStatus = computeStatus(nextHighlights, nextShare)
+
+      return {
+        ...prev,
+        highlightKeys: [dedupeKey, ...prev.highlightKeys],
+        todayHighlightsCount: nextHighlights,
+        status: nextStatus,
+      }
     })
   }, [])
 
-  const incrementCircleShares = useCallback(() => {
+  /**
+   * ✅ 공유 1회 인정 (이메일 단위 중복 방지)
+   * - 기본: 현재 URL에서 /inbox/{emailId} 추출 → `share:email:{emailId}`
+   * - 인자를 주면 그 값을 키로 사용(확장용: shareKey = `${emailId}:${circleId}` 등)
+   */
+  const incrementCircleShares = useCallback((key?: string) => {
     setState((prev) => {
-      const today = getDateKey()
-      const normalized = normalizeToToday(prev, today)
-      const nextShares = normalized.todayCircleSharesCount + 1
-      const nextStatus = computeStatus(normalized.todayHighlightsCount, nextShares)
+      const inferredEmailId = inferEmailIdFromPath()
+      const dedupeKey = key?.trim()
+        ? `share:${key.trim()}`
+        : inferredEmailId
+          ? `share:email:${inferredEmailId}`
+          : "share:global"
 
-      const next = { ...normalized, todayCircleSharesCount: nextShares, status: nextStatus }
-      writeState(next)
-      return next
+      if (prev.shareKeys.includes(dedupeKey)) {
+        return prev // 이미 인정됨
+      }
+
+      const nextHighlights = prev.todayHighlightsCount
+      const nextShares = prev.todayCircleSharesCount + 1
+      const nextStatus = computeStatus(nextHighlights, nextShares)
+
+      return {
+        ...prev,
+        shareKeys: [dedupeKey, ...prev.shareKeys],
+        todayCircleSharesCount: nextShares,
+        status: nextStatus,
+      }
     })
   }, [])
 
   const markCompletionToastShown = useCallback(() => {
-    setState((prev) => {
-      const next = { ...prev, hasShownCompletionToast: true }
-      writeState(next)
-      return next
-    })
+    setState((prev) => ({
+      ...prev,
+      hasShownCompletionToast: true,
+    }))
   }, [])
 
   return {
