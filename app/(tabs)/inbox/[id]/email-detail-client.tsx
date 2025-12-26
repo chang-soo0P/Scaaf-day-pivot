@@ -82,9 +82,7 @@ type CircleItem = {
 type ApiCirclesListResponse = { ok: true; circles: CircleItem[] } | { ok: false; error?: string }
 
 // ✅ share target(모달이 “이메일 공유”인지 “하이라이트 공유”인지 구분)
-type ShareTarget =
-  | { type: "email" }
-  | { type: "highlight"; highlightId?: string; quote: string }
+type ShareTarget = { type: "email" } | { type: "highlight"; highlightId?: string; quote: string }
 
 type ApiShareResponse = { ok: true; duplicated?: boolean } | { ok: false; error?: string }
 
@@ -920,11 +918,7 @@ export default function EmailDetailClient({
             className="flex w-full items-center justify-between rounded-xl bg-secondary/50 px-4 py-3"
           >
             <span className="text-sm font-medium text-foreground">Original email</span>
-            {isOriginalExpanded ? (
-              <ChevronUp className="h-4 w-4 text-muted-foreground" />
-            ) : (
-              <ChevronDown className="h-4 w-4 text-muted-foreground" />
-            )}
+            {isOriginalExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
           </button>
 
           <AnimatePresence>
@@ -958,11 +952,7 @@ export default function EmailDetailClient({
                     "[&_code]:rounded [&_code]:bg-secondary/40 [&_code]:px-1 [&_code]:py-0.5"
                   )}
                 >
-                  {sanitizedHtml ? (
-                    <div className="space-y-3" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} />
-                  ) : (
-                    email.body
-                  )}
+                  {sanitizedHtml ? <div className="space-y-3" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} /> : email.body}
                 </div>
               </motion.div>
             )}
@@ -1015,9 +1005,7 @@ export default function EmailDetailClient({
                             onClick={() => toggleReaction(comment.id, reaction.emoji)}
                             className={cn(
                               "flex items-center gap-1 rounded-full px-2 py-0.5 text-xs transition-colors",
-                              reaction.reacted
-                                ? "bg-primary/20 text-primary"
-                                : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                              reaction.reacted ? "bg-primary/20 text-primary" : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
                             )}
                           >
                             <span>{reaction.emoji}</span>
@@ -1157,17 +1145,17 @@ export default function EmailDetailClient({
                         key={c.id}
                         disabled={sharing}
                         onClick={async () => {
-                          // 1) 이메일을 feed로 공유 (circle_emails insert)
                           const r = await shareEmailToCircle(c.id)
                           if (!r.ok) {
                             alert(r.error ?? "Share failed")
                             return
                           }
 
+                          // ✅ duplicated 토스트 + 카운트
                           if (r.duplicated) {
-                            toast({ title: "Already shared", description: "이미 이 Circle에 공유된 이메일이야." })
+                            toast({ title: "Already shared", description: "This email is already shared to that circle." })
                           } else {
-                            // ✅ Daily mission: share +1 (중복이 아닐 때만)
+                            toast({ title: "Shared to circle ✅", description: "Added to your circle feed." })
                             incrementCircleShares()
                           }
 
@@ -1184,8 +1172,6 @@ export default function EmailDetailClient({
                           setShowShareModal(false)
                           setHighlightToShare(null)
                           setShareTarget(null)
-
-                          // ✅ 공유 후 현재 상세 페이지 유지(탭 라우팅 혼동 방지)
                           router.refresh()
                         }}
                         className={cn(
@@ -1276,7 +1262,6 @@ export default function EmailDetailClient({
    * ------------------------------*/
   return (
     <div className="flex min-h-full flex-col bg-background">
-      {/* Header */}
       <div className="sticky top-0 z-20 flex items-center justify-between border-b border-border/50 bg-background/95 px-4 py-3 backdrop-blur-sm">
         <button
           onClick={() => router.back()}
@@ -1295,7 +1280,6 @@ export default function EmailDetailClient({
             <Plus className="h-4 w-4" />
           </button>
 
-          {/* ✅ 헤더 Share 버튼: 이메일 공유 모드 */}
           <button
             onClick={() => {
               setShareTarget({ type: "email" })

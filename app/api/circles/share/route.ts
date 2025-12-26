@@ -12,28 +12,36 @@ export async function POST(req: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser()
 
-  if (!user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
-
-  const body = await req.json().catch(() => null)
-  const circleId = body?.circleId as string | undefined
-  const emailId = body?.emailId as string | undefined
-
-  if (!circleId || !emailId || !isUuid(circleId) || !isUuid(emailId)) {
-    return NextResponse.json({ ok: false, error: "Invalid payload" }, { status: 400 })
+  if (!user) {
+    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
   }
 
-  // circle 멤버인지 확인
-  const { data: mem, error: mErr } = await supabase
+  let body: any = null
+  try {
+    body = await req.json()
+  } catch {
+    return NextResponse.json({ ok: false, error: "Invalid JSON" }, { status: 400 })
+  }
+
+  const circleId = String(body?.circleId ?? "")
+  const emailId = String(body?.emailId ?? "")
+
+  if (!isUuid(circleId) || !isUuid(emailId)) {
+    return NextResponse.json({ ok: false, error: "Invalid circleId or emailId" }, { status: 400 })
+  }
+
+  // (선택) 멤버십 확인: circle_members에 있어야 공유 가능
+  const { data: member, error: mErr } = await supabase
     .from("circle_members")
-    .select("circle_id")
+    .select("id")
     .eq("circle_id", circleId)
     .eq("user_id", user.id)
     .maybeSingle()
 
   if (mErr) return NextResponse.json({ ok: false, error: mErr.message }, { status: 500 })
-  if (!mem) return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 })
+  if (!member) return NextResponse.json({ ok: false, error: "Not a member of this circle" }, { status: 403 })
 
-  // 중복 방지(유니크 제약 없어도 동작)
+  // ✅ 중복 체크
   const { data: existing, error: exErr } = await supabase
     .from("circle_emails")
     .select("id")
@@ -42,7 +50,10 @@ export async function POST(req: NextRequest) {
     .maybeSingle()
 
   if (exErr) return NextResponse.json({ ok: false, error: exErr.message }, { status: 500 })
-  if (existing) return NextResponse.json({ ok: true, duplicated: true }, { status: 200 })
+
+  if (existing?.id) {
+    return NextResponse.json({ ok: true, duplicated: true }, { status: 200 })
+  }
 
   const { error: insErr } = await supabase.from("circle_emails").insert({
     circle_id: circleId,
@@ -52,5 +63,5 @@ export async function POST(req: NextRequest) {
 
   if (insErr) return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
 
-  return NextResponse.json({ ok: true }, { status: 200 })
+  return NextResponse.json({ ok: true, duplicated: false }, { status: 200 })
 }

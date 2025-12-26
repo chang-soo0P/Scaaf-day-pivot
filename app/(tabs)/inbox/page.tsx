@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useState, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { emailDetailHref } from "@/lib/email-href"
 import { cn } from "@/lib/utils"
@@ -52,11 +52,24 @@ function SkeletonRow() {
 export default function InboxPage() {
   const router = useRouter()
 
-  const { state: missionState } = useDailyMission()
+  const { state: missionState, markCompletionToastShown } = useDailyMission()
 
   const [loading, setLoading] = useState(true)
   const [items, setItems] = useState<InboxEmailRow[]>([])
   const [error, setError] = useState<string | null>(null)
+
+  const openEmail = useCallback(
+    (id: string) => {
+      const href = emailDetailHref(id) ?? `/inbox/${id}`
+      router.push(href)
+    },
+    [router]
+  )
+
+  const openLatestEmail = useCallback(() => {
+    const first = items?.[0]?.id
+    if (first) openEmail(first)
+  }, [items, openEmail])
 
   async function load() {
     try {
@@ -102,16 +115,6 @@ export default function InboxPage() {
     })
   }, [items])
 
-  const openEmail = (id: string) => {
-    const href = emailDetailHref(id) ?? `/inbox/${id}`
-    router.push(href)
-  }
-
-  const openLatestEmail = () => {
-    const first = mapped[0]
-    if (first?.id) openEmail(first.id)
-  }
-
   return (
     <div className="flex min-h-full flex-col">
       <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm px-4 pt-4 pb-3">
@@ -138,12 +141,12 @@ export default function InboxPage() {
       </div>
 
       <div className="flex-1 px-4 pb-24">
-        {/* ✅ Daily Mission (ShineBorder) */}
-        <div className="mt-3 mb-4">
+        <div className="mt-3">
           <TodayMissionCard
             state={missionState}
             onFindHighlight={openLatestEmail}
             onShareHighlight={openLatestEmail}
+            markCompletionToastShown={markCompletionToastShown}
           />
         </div>
 
