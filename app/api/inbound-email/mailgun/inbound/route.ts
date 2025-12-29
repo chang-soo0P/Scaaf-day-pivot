@@ -1,256 +1,137 @@
-import { NextResponse } from "next/server"
-import { createClient } from "@supabase/supabase-js"
-import crypto from "crypto"
+import { NextRequest, NextResponse } from "next/server"
+import { createHmac, timingSafeEqual } from "crypto"
+import { createSupabaseRouteClient } from "@/app/api/_supabase/route-client"
 
 export const runtime = "nodejs"
-export const dynamic = "force-dynamic"
 
-export async function GET() {
-  return NextResponse.json({ ok: true, route: "mailgun-inbound" }, { status: 200 })
+function pickFirstEmail(v: string) {
+  const first = v.split(",")[0]?.trim() ?? ""
+  const m = first.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+  return (m?.[0] ?? first).toLowerCase()
 }
 
-export async function HEAD() {
-  return new NextResponse(null, { status: 200 })
+function localPartOf(email: string) {
+  const at = email.indexOf("@")
+  return at >= 0 ? email.slice(0, at).toLowerCase() : email.toLowerCase()
 }
 
-export async function OPTIONS() {
-  return new NextResponse(null, { status: 200 })
-}
+function verifyMailgunSignature(params: Record<string, string>, signingKey: string) {
+  const timestamp = params["timestamp"] ?? ""
+  const token = params["token"] ?? ""
+  const signature = params["signature"] ?? ""
+  if (!timestamp || !token || !signature) return false
 
-function extractFirstEmail(raw: string): string {
-  const m = raw.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
-  return (m?.[0] ?? "").toLowerCase()
-}
+  const hmac = createHmac("sha256", signingKey)
+  hmac.update(timestamp + token)
+  const digestHex = hmac.digest("hex")
 
-function verifyMailgunSignature(params: {
-  timestamp: string
-  token: string
-  signature: string
-  signingKey: string
-}) {
-  const { timestamp, token, signature, signingKey } = params
-  const expected = crypto
-    .createHmac("sha256", signingKey)
-    .update(timestamp + token)
-    .digest("hex")
-
-  const a = Buffer.from(expected)
-  const b = Buffer.from(signature || "")
-  if (a.length !== b.length) return false
-  return crypto.timingSafeEqual(a, b)
-}
-
-function formDataToObject(fd: FormData) {
-  const obj: Record<string, any> = {}
-  fd.forEach((value, key) => {
-    if (typeof value === "string") obj[key] = value
-    else obj[key] = { filename: value.name, type: value.type, size: value.size }
-  })
-  return obj
-}
-
-async function logEvent(
-  supabase: ReturnType<typeof createClient> | null,
-  evt: { status: number; note: string; payload?: Record<string, any> }
-) {
-  if (!supabase) return
   try {
-    await supabase.from("webhook_events").insert({
-      source: "mailgun",
-      path: "/api/inbound-email/mailgun/inbound",
-      method: "POST",
-      status: evt.status,
-      note: evt.note,
-      payload: evt.payload ?? null,
-    })
+    const a = new Uint8Array(Buffer.from(digestHex, "hex"))
+    const b = new Uint8Array(Buffer.from(signature, "hex"))
+    return timingSafeEqual(a, b)
   } catch {
-    // ignore
+    return false
   }
 }
 
-async function relayToProduction(original: FormData) {
-  const prodUrl =
-    process.env.PROD_INBOUND_URL ||
-    "https://scaaf.day/api/inbound-email/mailgun/inbound"
+export async function POST(req: NextRequest) {
+  const supabase = await createSupabaseRouteClient()
 
-  const res = await fetch(prodUrl, {
-    method: "POST",
-    headers: { "x-scaaf-relay": "1" },
-    body: original,
+  // Mailgun inbound: multipart/form-data
+  const form = await req.formData()
+  const payload: Record<string, string> = {}
+  form.forEach((value, key) => {
+    payload[key] = typeof value === "string" ? value : ""
   })
 
-  const text = await res.text()
-  return { status: res.status, text }
-}
-
-export async function POST(req: Request) {
-  // ✅ pause switch
-  if (process.env.INBOUND_PAUSED === "true") {
-    return NextResponse.json({ ok: true, paused: true }, { status: 200 })
+  // 1) signature verify (있으면 검증)
+  const signingKey = process.env.MAILGUN_SIGNING_KEY
+  if (signingKey) {
+    const ok = verifyMailgunSignature(payload, signingKey)
+    if (!ok) {
+      return NextResponse.json({ ok: false, error: "Invalid signature" }, { status: 401 })
+    }
   }
 
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  // 2) recipient(to) 추출
+  const toRaw = payload["recipient"] || payload["to"] || payload["To"] || payload["envelope"] || ""
 
-  const supabase =
-    supabaseUrl && serviceKey
-      ? createClient(supabaseUrl, serviceKey, { auth: { persistSession: false } })
-      : null
-
-  try {
-    const relayed = req.headers.get("x-scaaf-relay") === "1"
-    const body = await req.formData()
-
-    // signature fields
-    const timestamp = String(body.get("timestamp") ?? "")
-    const token = String(body.get("token") ?? "")
-    const signature = String(body.get("signature") ?? "")
-
-    // payload fields
-    const fromRaw = String(body.get("from") ?? "")
-    const toRaw =
-      String(body.get("recipient") ?? "") ||
-      String(body.get("to") ?? "") ||
-      String(body.get("To") ?? "") ||
-      ""
-
-    const subject = String(body.get("subject") ?? "")
-    const bodyText = String(body.get("stripped-text") ?? body.get("body-plain") ?? "")
-    const bodyHtml = String(body.get("stripped-html") ?? body.get("body-html") ?? "")
-    const messageId = String(
-      body.get("Message-Id") ?? body.get("message-id") ?? body.get("Message-ID") ?? ""
-    )
-
-    const fromAddress = extractFirstEmail(fromRaw)
-    const toAddress = extractFirstEmail(toRaw)
-
-    const receivedAt = timestamp
-      ? new Date(Number(timestamp) * 1000).toISOString()
-      : new Date().toISOString()
-
-    await logEvent(supabase, {
-      status: 100,
-      note: "hit",
-      payload: { relayed, toRaw, toAddress, subject },
-    })
-
-    if (!supabase) {
-      return NextResponse.json(
-        { ok: false, error: "Missing Supabase env vars on server" },
-        { status: 500 }
-      )
+  let toEmail = ""
+  if (toRaw.startsWith("{")) {
+    // envelope JSON: {"to":["xxx@scaaf.day"],"from":"..."}
+    try {
+      const env = JSON.parse(toRaw)
+      const arr = Array.isArray(env?.to) ? env.to : []
+      toEmail = pickFirstEmail(String(arr?.[0] ?? ""))
+    } catch {
+      toEmail = ""
     }
+  } else {
+    toEmail = pickFirstEmail(String(toRaw))
+  }
 
-    // signature verify
-    const signingKey =
-      process.env.MAILGUN_WEBHOOK_SIGNING_KEY || process.env.MAILGUN_PRIVATE_API_KEY
-    const disableSigCheck = process.env.MAILGUN_DISABLE_SIGNATURE_CHECK === "true"
+  if (!toEmail || !toEmail.includes("@")) {
+    return NextResponse.json({ ok: false, error: "Missing recipient" }, { status: 400 })
+  }
 
-    if (!disableSigCheck) {
-      if (!signingKey) {
-        await logEvent(supabase, { status: 500, note: "missing_mailgun_signing_key" })
-        return NextResponse.json(
-          { ok: false, error: "Missing MAILGUN_WEBHOOK_SIGNING_KEY (or MAILGUN_PRIVATE_API_KEY)" },
-          { status: 500 }
-        )
-      }
-      const ok = verifyMailgunSignature({ timestamp, token, signature, signingKey })
-      if (!ok) {
-        await logEvent(supabase, { status: 401, note: "invalid_signature" })
-        return NextResponse.json({ ok: false, error: "Invalid signature" }, { status: 401 })
-      }
+  const local = localPartOf(toEmail)
+
+  // 3) addresses 매칭
+  const { data: address, error: addrErr } = await supabase
+    .from("addresses")
+    .select("id, status")
+    .eq("local_part", local)
+    .maybeSingle()
+
+  if (addrErr) return NextResponse.json({ ok: false, error: addrErr.message }, { status: 500 })
+
+  // 없거나 비활성: Mailgun 재시도 폭탄 방지 위해 200으로 먹고 종료
+  if (!address?.id || address.status !== "active") {
+    return NextResponse.json({ ok: true, ignored: true }, { status: 200 })
+  }
+
+  // 4) payload 정리
+  const fromEmail = pickFirstEmail(String(payload["from"] || payload["From"] || ""))
+  const subject = (payload["subject"] || payload["Subject"] || "").toString() || null
+
+  const bodyText =
+    (payload["stripped-text"] || payload["body-plain"] || payload["text"] || "").toString() || null
+  const bodyHtml =
+    (payload["stripped-html"] || payload["body-html"] || payload["html"] || "").toString() || null
+
+  const messageId =
+    (payload["Message-Id"] || payload["message-id"] || payload["message_id"] || "").toString() || null
+
+  const receivedAt = new Date().toISOString()
+
+  const insertRow: Record<string, any> = {
+    address_id: address.id,
+    user_id: null,
+    message_id: messageId,
+    from_address: fromEmail || null,
+    subject,
+    body_text: bodyText,
+    body_html: bodyHtml,
+    raw: payload,
+    received_at: receivedAt,
+    to_address: toEmail, // 있을 수도/없을 수도 → 아래에서 에러면 제거 후 재시도
+  }
+
+  const { error: insErr } = await supabase.from("inbox_emails").insert(insertRow)
+
+  if (insErr) {
+    const msg = String(insErr.message || "").toLowerCase()
+    if (msg.includes("to_address")) {
+      delete insertRow.to_address
+      const { error: retryErr } = await supabase.from("inbox_emails").insert(insertRow)
+      if (retryErr) return NextResponse.json({ ok: false, error: retryErr.message }, { status: 500 })
     } else {
-      await logEvent(supabase, { status: 101, note: "signature_check_disabled" })
+      return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
     }
-
-    // DEV test routing (테스트 prefix만 dev에 저장)
-    const TEST_PREFIX = "273fcf3e."
-    const isDevTest = toAddress.startsWith(TEST_PREFIX)
-
-    // not dev test => relay to production (avoid loop)
-    if (!isDevTest && !relayed) {
-      await logEvent(supabase, { status: 120, note: "relay_to_prod" })
-      const { status, text } = await relayToProduction(body)
-      await logEvent(supabase, { status, note: "relay_result", payload: { status } })
-      return new NextResponse(text, { status })
-    }
-
-    // map to user
-    let user_id: string | null = null
-    let address_id: string | null = null
-
-    if (toAddress) {
-      const { data: addrRow, error: addrErr } = await supabase
-        .from("user_addresses")
-        .select("id,user_id,email_address")
-        .eq("email_address", toAddress)
-        .maybeSingle()
-
-      if (addrErr) {
-        await logEvent(supabase, {
-          status: 500,
-          note: "user_addresses_lookup_error",
-          payload: { message: addrErr.message, toAddress },
-        })
-      } else if (addrRow) {
-        user_id = addrRow.user_id
-        address_id = addrRow.id
-      }
-    }
-
-    await logEvent(supabase, {
-      status: 110,
-      note: "mapping_checked",
-      payload: { mapped: Boolean(user_id), user_id, address_id, toAddress },
-    })
-
-    // ✅ inbox_emails에는 to_address 컬럼이 없음 → raw(jsonb)로 남김
-    const rawObj = formDataToObject(body)
-
-    const { data, error } = await supabase
-      .from("inbox_emails")
-      .insert({
-        user_id,
-        address_id,
-        message_id: messageId || null,
-        from_address: fromAddress || fromRaw,
-        subject,
-        body_html: bodyHtml,
-        body_text: bodyText,
-        raw: rawObj,
-        received_at: receivedAt,
-      })
-      .select("id")
-      .single()
-
-    if (error) {
-      await logEvent(supabase, {
-        status: 500,
-        note: "supabase_insert_error",
-        payload: { code: (error as any).code ?? null, message: error.message },
-      })
-      return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
-    }
-
-    await logEvent(supabase, {
-      status: 200,
-      note: "insert_ok",
-      payload: { id: data?.id, mapped: Boolean(user_id), user_id },
-    })
-
-    return NextResponse.json(
-      { ok: true, id: data?.id, mapped: Boolean(user_id), user_id },
-      { status: 200 }
-    )
-  } catch (err: any) {
-    console.error("Webhook error:", err)
-    if (supabase) {
-      await logEvent(supabase, {
-        status: 500,
-        note: "webhook_exception",
-        payload: { message: err?.message ?? String(err) },
-      })
-    }
-    return NextResponse.json({ ok: false, error: "Webhook error" }, { status: 500 })
   }
+
+  // 5) last_received_at 업데이트
+  await supabase.from("addresses").update({ last_received_at: receivedAt }).eq("id", address.id)
+
+  return NextResponse.json({ ok: true }, { status: 200 })
 }

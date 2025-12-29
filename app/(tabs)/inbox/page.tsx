@@ -1,12 +1,13 @@
 "use client"
 
-import { useEffect, useMemo, useState, useCallback } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { useRouter } from "next/navigation"
 import { emailDetailHref } from "@/lib/email-href"
 import { cn } from "@/lib/utils"
-import { Mail, RefreshCw } from "lucide-react"
+import { Mail, RefreshCw, Sparkles, Target, Copy, AtSign } from "lucide-react"
 import { TodayMissionCard } from "@/components/today-mission-card"
 import { useDailyMission } from "@/hooks/use-daily-mission"
+import { useToast } from "@/hooks/use-toast"
 
 type InboxEmailRow = {
   id: string
@@ -16,6 +17,16 @@ type InboxEmailRow = {
 }
 
 type ApiInboxListResponse = { ok: true; items: InboxEmailRow[] } | { ok: false; error?: string }
+
+type AddressRow = {
+  id: string
+  local_part: string
+  domain: string
+  full_address: string
+  status: string
+}
+
+type ApiAddressMeResponse = { ok: true; address: AddressRow } | { ok: false; error?: string }
 
 async function safeReadJson<T>(res: Response): Promise<T> {
   const text = await res.text()
@@ -51,25 +62,19 @@ function SkeletonRow() {
 
 export default function InboxPage() {
   const router = useRouter()
-
-  const { state: missionState, markCompletionToastShown } = useDailyMission()
+  const { toast } = useToast()
 
   const [loading, setLoading] = useState(true)
   const [items, setItems] = useState<InboxEmailRow[]>([])
   const [error, setError] = useState<string | null>(null)
 
-  const openEmail = useCallback(
-    (id: string) => {
-      const href = emailDetailHref(id) ?? `/inbox/${id}`
-      router.push(href)
-    },
-    [router]
-  )
+  // ✅ Address card state
+  const [addrLoading, setAddrLoading] = useState(true)
+  const [address, setAddress] = useState<AddressRow | null>(null)
+  const [addrError, setAddrError] = useState<string | null>(null)
 
-  const openLatestEmail = useCallback(() => {
-    const first = items?.[0]?.id
-    if (first) openEmail(first)
-  }, [items, openEmail])
+  // ✅ Daily mission
+  const { state: missionState } = useDailyMission()
 
   async function load() {
     try {
@@ -98,8 +103,33 @@ export default function InboxPage() {
     }
   }
 
+  async function loadAddress() {
+    try {
+      setAddrLoading(true)
+      setAddrError(null)
+
+      const res = await fetch("/api/addresses/me", { cache: "no-store", credentials: "include" })
+      const data = await safeReadJson<ApiAddressMeResponse>(res)
+
+      if (!res.ok || !data.ok) {
+        setAddress(null)
+        setAddrError((data as any)?.error ?? `HTTP ${res.status}`)
+        setAddrLoading(false)
+        return
+      }
+
+      setAddress(data.address)
+      setAddrLoading(false)
+    } catch (e: any) {
+      setAddress(null)
+      setAddrError(e?.message ?? "Failed to load address")
+      setAddrLoading(false)
+    }
+  }
+
   useEffect(() => {
     load()
+    loadAddress()
   }, [])
 
   const mapped = useMemo(() => {
@@ -114,6 +144,11 @@ export default function InboxPage() {
       }
     })
   }, [items])
+
+  const openEmail = (id: string) => {
+    const href = emailDetailHref(id) ?? `/inbox/${id}`
+    router.push(href)
+  }
 
   return (
     <div className="flex min-h-full flex-col">
@@ -141,13 +176,56 @@ export default function InboxPage() {
       </div>
 
       <div className="flex-1 px-4 pb-24">
-        <div className="mt-3">
-          <TodayMissionCard
-            state={missionState}
-            onFindHighlight={openLatestEmail}
-            onShareHighlight={openLatestEmail}
-            markCompletionToastShown={markCompletionToastShown}
-          />
+        {/* ✅ 0) Your Scaaf Address */}
+        <div className="mt-3 mb-4 rounded-2xl bg-card p-4 ring-1 ring-border/60 shadow-sm">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <AtSign className="h-4 w-4 text-primary" />
+                <div className="text-sm font-semibold text-foreground">Your Scaaf address</div>
+              </div>
+
+              {addrLoading ? (
+                <p className="mt-2 text-sm text-muted-foreground">Issuing address…</p>
+              ) : addrError ? (
+                <p className="mt-2 text-sm text-destructive">{addrError}</p>
+              ) : address ? (
+                <>
+                  <p className="mt-2 text-base font-semibold text-foreground">{address.full_address}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    뉴스레터 구독 이메일 주소를 위 주소로 바꾸면 바로 수신/요약/하이라이트/공유 테스트 가능.
+                  </p>
+                </>
+              ) : (
+                <p className="mt-2 text-sm text-muted-foreground">No address</p>
+              )}
+            </div>
+
+            <button
+              type="button"
+              disabled={!address?.full_address || addrLoading}
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(address?.full_address ?? "")
+                  toast({ title: "Copied", description: "수신 주소를 클립보드에 복사했어." })
+                } catch {
+                  toast({ title: "Copy failed", description: "브라우저 권한 때문에 복사에 실패했어." })
+                }
+              }}
+              className={cn(
+                "shrink-0 inline-flex items-center gap-2 rounded-xl bg-secondary px-3 py-2 text-xs font-medium text-secondary-foreground hover:bg-secondary/80",
+                (!address?.full_address || addrLoading) && "opacity-60 cursor-not-allowed"
+              )}
+            >
+              <Copy className="h-3.5 w-3.5" />
+              Copy
+            </button>
+          </div>
+        </div>
+
+        {/* ✅ 1) Daily mission (기존 유지) */}
+        <div className="mb-4">
+          <TodayMissionCard state={missionState} />
         </div>
 
         {loading ? (
