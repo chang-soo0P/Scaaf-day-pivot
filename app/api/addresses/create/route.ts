@@ -1,96 +1,122 @@
-import { NextResponse } from "next/server"
-import { createServerClient } from "@supabase/ssr"
-import { cookies } from "next/headers"
+import { NextRequest, NextResponse } from "next/server"
 import { createClient } from "@supabase/supabase-js"
-import crypto from "crypto"
+import { createSupabaseRouteClient } from "@/app/api/_supabase/route-client"
 
 export const runtime = "nodejs"
-export const dynamic = "force-dynamic"
 
-function randomKey(len = 12) {
-  return crypto.randomBytes(24).toString("base64url").slice(0, len)
+const DOMAIN_DEFAULT = "scaaf.day"
+
+function isValidLocalPart(v: string) {
+  // a-z 0-9, ., _, -, 3~32 (원하면 조정)
+  return /^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$/.test(v)
 }
 
-export async function POST() {
-  const cookieStore = await cookies()
+function normalizeLocalPart(v: string) {
+  return v.trim().toLowerCase()
+}
 
-  // 1) 로그인 유저 확인(anon key, 세션 쿠키 기반)
-  const authed = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll: () => cookieStore.getAll(),
-        setAll: (cs) => cs.forEach(({ name, value, options }) => cookieStore.set(name, value, options)),
-      },
-    }
-  )
+function randomLocalPart() {
+  // 예: scaaf-7k3p9d
+  const s = Math.random().toString(36).slice(2, 8)
+  return `scaaf-${s}`
+}
 
+function getAdminSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !serviceKey) return null
+
+  return createClient(url, serviceKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+}
+
+async function safeReadJson(req: NextRequest) {
+  try {
+    return await req.json()
+  } catch {
+    return null
+  }
+}
+
+export async function POST(req: NextRequest) {
+  const routeSb = await createSupabaseRouteClient()
+  const adminSb = getAdminSupabase() // 있으면 RLS 무시 가능
+
+  // 로그인 유저 (있으면 연결)
   const {
     data: { user },
-    error: userErr,
-  } = await authed.auth.getUser()
+  } = await routeSb.auth.getUser()
 
-  if (userErr || !user) {
-    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+  const body = await safeReadJson(req)
+  const desiredRaw = typeof body?.localPart === "string" ? body.localPart : ""
+  const desired = desiredRaw ? normalizeLocalPart(desiredRaw) : ""
+
+  const domain =
+    (typeof body?.domain === "string" && body.domain.trim()) ||
+    process.env.MAIL_DOMAIN ||
+    DOMAIN_DEFAULT
+
+  let localPart = desired || randomLocalPart()
+
+  if (!isValidLocalPart(localPart)) {
+    // 사용자가 넣은 값이 이상하면 자동 생성으로 fallback
+    localPart = randomLocalPart()
   }
 
-  // 2) DB 작업은 service role(서버 전용)로
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+  const writer = adminSb ?? routeSb
 
-  if (!supabaseUrl || !serviceKey) {
-    return NextResponse.json(
-      { ok: false, error: "Missing Supabase env vars on server" },
-      { status: 500 }
-    )
-  }
+  // 충돌 방지 재시도
+  for (let i = 0; i < 6; i++) {
+    const full = `${localPart}@${domain}`
 
-  const admin = createClient(supabaseUrl, serviceKey, {
-    auth: { persistSession: false },
-  })
+    // 이미 존재하는지 확인
+    const { data: exists, error: exErr } = await writer
+      .from("addresses")
+      .select("id")
+      .eq("full_address", full)
+      .maybeSingle()
 
-  // 3) 이미 발급된 주소가 있으면 그대로 반환
-  const { data: existing, error: existingErr } = await admin
-    .from("user_addresses")
-    .select("id,email_address,created_at")
-    .eq("user_id", user.id)
-    .maybeSingle()
-
-  if (existingErr) {
-    return NextResponse.json({ ok: false, error: existingErr.message }, { status: 500 })
-  }
-
-  if (existing) {
-    return NextResponse.json({ ok: true, ...existing }, { status: 200 })
-  }
-
-  // 4) 새 주소 발급
-  // NEWSLETTER_DOMAIN = Mailgun receiving domain (예: mg.scaaf.day)
-  const domain = (process.env.NEWSLETTER_DOMAIN || "mg.scaaf.day").toLowerCase()
-  const localPart = `${user.id.slice(0, 8)}.${randomKey(12)}`
-  const email_address = `${localPart}@${domain}`.toLowerCase()
-
-  const { data, error } = await admin
-    .from("user_addresses")
-    .insert({ user_id: user.id, email_address })
-    .select("id,email_address,created_at")
-    .single()
-
-  if (error) {
-    // 동시 요청으로 unique 충돌 시 재조회로 복구
-    if (String(error.code) === "23505") {
-      const { data: again } = await admin
-        .from("user_addresses")
-        .select("id,email_address,created_at")
-        .eq("user_id", user.id)
-        .maybeSingle()
-
-      if (again) return NextResponse.json({ ok: true, ...again }, { status: 200 })
+    if (exErr) {
+      return NextResponse.json({ ok: false, error: exErr.message }, { status: 500 })
     }
 
-    return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+    if (exists?.id) {
+      localPart = randomLocalPart()
+      continue
+    }
+
+    // 생성
+    const claimToken = crypto.randomUUID()
+
+    const { data: inserted, error: insErr } = await writer
+      .from("addresses")
+      .insert({
+        user_id: user?.id ?? null,          // 로그인 유저면 연결
+        local_part: localPart,
+        domain,
+        full_address: full,
+        claim_token: claimToken,            // 로그인 유저여도 유지(옵션)
+        status: "active",                   // inbound에서 active만 받도록 되어 있으니 active로
+      })
+      .select("id,user_id,local_part,domain,full_address,claim_token,status,created_at,last_received_at")
+      .single()
+
+    if (insErr) {
+      // 혹시 local_part unique 제약 등이 있다면 재시도
+      const msg = String(insErr.message || "").toLowerCase()
+      if (msg.includes("duplicate") || msg.includes("unique")) {
+        localPart = randomLocalPart()
+        continue
+      }
+      return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
+    }
+
+    return NextResponse.json({ ok: true, address: inserted }, { status: 200 })
   }
 
-  return NextResponse.json({ ok: true, ...data }, { status: 200 })
+  return NextResponse.json(
+    { ok: false, error: "Failed to generate unique address. Try again." },
+    { status: 500 }
+  )
 }
