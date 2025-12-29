@@ -1,8 +1,8 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { cn } from "@/lib/utils"
-import { Copy, Mail, RefreshCw, Sparkles } from "lucide-react"
+import { Copy, Mail, RefreshCw, Sparkles, AlertTriangle } from "lucide-react"
 
 type AddressRow = {
   id: string
@@ -27,11 +27,50 @@ async function safeReadJson<T>(res: Response): Promise<T> {
   }
 }
 
+const DOMAIN_FALLBACK = "scaaf.day"
+
+// 3~32 chars, first must be a-z0-9, allowed: a-z0-9._-
+const LOCAL_PART_RE = /^[a-z0-9][a-z0-9._-]{2,31}$/
+
+function normalizeLocalPart(input: string) {
+  let v = (input ?? "").trim().toLowerCase()
+
+  // 사용자가 email을 통째로 붙여넣은 경우(local@domain) → local만 추출
+  if (v.includes("@")) v = v.split("@")[0] ?? ""
+
+  // 공백 제거
+  v = v.replace(/\s+/g, "")
+
+  // 허용 문자만 남기기(UX)
+  v = v.replace(/[^a-z0-9._-]/g, "")
+
+  return v
+}
+
+function localPartError(v: string) {
+  if (!v) return "원하는 주소를 입력해줘."
+  if (v.length < 3) return "너무 짧아. 3자 이상이어야 해."
+  if (v.length > 32) return "너무 길어. 32자 이하로 입력해줘."
+  if (!/^[a-z0-9]/.test(v)) return "첫 글자는 a-z 또는 0-9 로 시작해야 해."
+  if (!/^[a-z0-9._-]+$/.test(v)) return "허용 문자는 a-z, 0-9, . _ - 만 가능해."
+  if (!LOCAL_PART_RE.test(v)) return "형식이 맞지 않아. (예: marv_01, scaaf.day)"
+  return null
+}
+
 export default function AddressSettingsPage() {
   const [loading, setLoading] = useState(true)
   const [creating, setCreating] = useState(false)
   const [address, setAddress] = useState<AddressRow | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  // ✅ 입력 UI
+  const [rawLocalPart, setRawLocalPart] = useState("")
+  const localPart = useMemo(() => normalizeLocalPart(rawLocalPart), [rawLocalPart])
+  const localPartErr = useMemo(() => localPartError(localPart), [localPart])
+  const canCreate = !localPartErr && !!localPart
+
+  const domainForPreview = address?.domain || DOMAIN_FALLBACK
+  const previewAddress = localPart ? `${localPart}@${domainForPreview}` : `yourname@${domainForPreview}`
 
   const load = async () => {
     setLoading(true)
@@ -61,17 +100,20 @@ export default function AddressSettingsPage() {
     setCreating(true)
     setError(null)
     try {
+      const payload = { localPart } // 서버에서 localPart 받도록 맞춰둔 기준
       const res = await fetch("/api/addresses/create", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({}), // 원하면 { localPart: "myname" }도 가능
+        body: JSON.stringify(payload),
         credentials: "include",
       })
+
       const data = await safeReadJson<ApiCreate>(res)
       if (!res.ok || !data.ok) {
         setError((data as any)?.error ?? `HTTP ${res.status}`)
         return
       }
+
       setAddress(data.address)
     } catch (e: any) {
       setError(e?.message ?? "Failed to create")
@@ -101,18 +143,21 @@ export default function AddressSettingsPage() {
         {loading ? (
           <div className="text-sm text-muted-foreground">Loading…</div>
         ) : error ? (
-          <div className="text-sm text-destructive">{error}</div>
+          <div className="flex items-start gap-2 text-sm text-destructive">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div className="min-w-0">{error}</div>
+          </div>
         ) : address ? (
           <>
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <div className="text-xs text-muted-foreground">Your address</div>
-                <div className="mt-1 text-sm font-semibold text-foreground break-all">
-                  {address.full_address}
-                </div>
+                <div className="mt-1 text-sm font-semibold text-foreground break-all">{address.full_address}</div>
                 <div className="mt-2 text-[11px] text-muted-foreground">
                   Status: {address.status}
-                  {address.last_received_at ? ` • Last received: ${new Date(address.last_received_at).toLocaleString()}` : ""}
+                  {address.last_received_at
+                    ? ` • Last received: ${new Date(address.last_received_at).toLocaleString()}`
+                    : ""}
                 </div>
               </div>
 
@@ -150,20 +195,70 @@ export default function AddressSettingsPage() {
           </>
         ) : (
           <>
-            <div className="text-sm font-semibold text-foreground">No address yet</div>
+            <div className="text-sm font-semibold text-foreground">Create your @scaaf.day</div>
             <p className="mt-1 text-sm text-muted-foreground">
-              먼저 @scaaf.day 주소를 만들고, 그 주소로 뉴스레터를 구독해보자.
+              원하는 주소를 정하고, 그 주소로 뉴스레터를 구독해보자.
             </p>
+
+            {/* ✅ localPart 입력 */}
+            <div className="mt-4">
+              <label className="block text-xs font-medium text-muted-foreground">Address</label>
+
+              <div className="mt-2 flex items-center gap-2">
+                <div className="flex-1 rounded-2xl bg-secondary/40 ring-1 ring-border/60 px-3 py-2">
+                  <input
+                    value={rawLocalPart}
+                    onChange={(e) => setRawLocalPart(e.target.value)}
+                    placeholder="e.g. marv_01"
+                    className="w-full bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    inputMode="text"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setRawLocalPart((v) => (v ? "" : "marv_01"))}
+                  className="shrink-0 rounded-xl bg-secondary px-3 py-2 text-xs font-medium hover:bg-secondary/80"
+                >
+                  {rawLocalPart ? "Clear" : "Example"}
+                </button>
+              </div>
+
+              <div className="mt-2 text-xs">
+                <span className="text-muted-foreground">Preview: </span>
+                <span className="font-medium text-foreground">{previewAddress}</span>
+              </div>
+
+              {localPartErr ? (
+                <div className="mt-2 text-xs text-destructive">{localPartErr}</div>
+              ) : (
+                <div className="mt-2 text-xs text-muted-foreground">
+                  규칙: 3~32자 / a-z, 0-9, . _ - / 첫 글자는 a-z 또는 0-9
+                </div>
+              )}
+            </div>
+
             <button
               onClick={createAddress}
-              disabled={creating}
+              disabled={creating || !canCreate}
               className={cn(
-                "mt-4 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:opacity-90",
-                creating && "opacity-60 cursor-not-allowed"
+                "mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground hover:opacity-90",
+                (creating || !canCreate) && "opacity-60 cursor-not-allowed"
               )}
             >
               <Sparkles className="h-4 w-4" />
               {creating ? "Creating…" : "Create my @scaaf.day"}
+            </button>
+
+            <button
+              onClick={load}
+              className="mt-3 inline-flex items-center gap-2 rounded-xl bg-secondary px-3 py-2 text-xs font-medium hover:bg-secondary/80"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Refresh
             </button>
           </>
         )}
