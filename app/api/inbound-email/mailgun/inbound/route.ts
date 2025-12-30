@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { createHmac, timingSafeEqual } from "crypto"
+import { createHmac, timingSafeEqual } from "node:crypto"
 import { createSupabaseRouteClient } from "@/app/api/_supabase/route-client"
 
 export const runtime = "nodejs"
@@ -21,13 +21,13 @@ function verifyMailgunSignature(params: Record<string, string>, signingKey: stri
   const signature = params["signature"] ?? ""
   if (!timestamp || !token || !signature) return false
 
-  const hmac = createHmac("sha256", signingKey)
-  hmac.update(timestamp + token)
-  const digestHex = hmac.digest("hex")
+  const digest = createHmac("sha256", signingKey).update(timestamp + token).digest("hex")
 
   try {
-    const a = new Uint8Array(Buffer.from(digestHex, "hex"))
-    const b = new Uint8Array(Buffer.from(signature, "hex"))
+    // ✅ TS/런타임 안정: Buffer -> Uint8Array 로 변환해서 timingSafeEqual에 전달
+    const a = Uint8Array.from(Buffer.from(digest, "hex"))
+    const b = Uint8Array.from(Buffer.from(signature, "hex"))
+    if (a.length !== b.length) return false
     return timingSafeEqual(a, b)
   } catch {
     return false
@@ -58,7 +58,6 @@ export async function POST(req: NextRequest) {
 
   let toEmail = ""
   if (toRaw.startsWith("{")) {
-    // envelope JSON: {"to":["xxx@scaaf.day"],"from":"..."}
     try {
       const env = JSON.parse(toRaw)
       const arr = Array.isArray(env?.to) ? env.to : []
@@ -104,7 +103,7 @@ export async function POST(req: NextRequest) {
 
   const receivedAt = new Date().toISOString()
 
-  const insertRow: Record<string, any> = {
+  const insertRow: any = {
     address_id: address.id,
     user_id: null,
     message_id: messageId,
@@ -114,8 +113,10 @@ export async function POST(req: NextRequest) {
     body_html: bodyHtml,
     raw: payload,
     received_at: receivedAt,
-    to_address: toEmail, // 있을 수도/없을 수도 → 아래에서 에러면 제거 후 재시도
   }
+
+  // to_address 컬럼은 있을 수도/없을 수도 → 있으면 넣고, 에러면 제거 후 재시도
+  insertRow.to_address = toEmail
 
   const { error: insErr } = await supabase.from("inbox_emails").insert(insertRow)
 
