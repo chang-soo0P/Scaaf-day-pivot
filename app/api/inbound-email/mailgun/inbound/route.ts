@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
-import { createHmac, timingSafeEqual } from "node:crypto"
-import { createSupabaseRouteClient } from "@/app/api/_supabase/route-client"
+import crypto from "crypto"
+import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 
 export const runtime = "nodejs"
 
@@ -21,21 +21,24 @@ function verifyMailgunSignature(params: Record<string, string>, signingKey: stri
   const signature = params["signature"] ?? ""
   if (!timestamp || !token || !signature) return false
 
-  const digest = createHmac("sha256", signingKey).update(timestamp + token).digest("hex")
+  const hmac = crypto.createHmac("sha256", signingKey)
+  hmac.update(timestamp + token)
+  const digest = hmac.digest("hex")
 
+  // ✅ TS(최신 lib.dom)에서 Buffer 타입 호환 이슈 방지: Uint8Array로 비교
   try {
-    // ✅ TS/런타임 안정: Buffer -> Uint8Array 로 변환해서 timingSafeEqual에 전달
-    const a = Uint8Array.from(Buffer.from(digest, "hex"))
-    const b = Uint8Array.from(Buffer.from(signature, "hex"))
-    if (a.length !== b.length) return false
-    return timingSafeEqual(a, b)
+    return crypto.timingSafeEqual(
+      new Uint8Array(Buffer.from(digest, "utf8")),
+      new Uint8Array(Buffer.from(signature, "utf8"))
+    )
   } catch {
     return false
   }
 }
 
 export async function POST(req: NextRequest) {
-  const supabase = await createSupabaseRouteClient()
+  // ✅ inbound webhook은 로그인/쿠키 없음 → admin client 사용
+  const supabase = createSupabaseAdminClient()
 
   // Mailgun inbound: multipart/form-data
   const form = await req.formData()
@@ -54,10 +57,16 @@ export async function POST(req: NextRequest) {
   }
 
   // 2) recipient(to) 추출
-  const toRaw = payload["recipient"] || payload["to"] || payload["To"] || payload["envelope"] || ""
+  const toRaw =
+    payload["recipient"] ||
+    payload["to"] ||
+    payload["To"] ||
+    payload["envelope"] ||
+    ""
 
   let toEmail = ""
   if (toRaw.startsWith("{")) {
+    // envelope JSON: {"to":["xxx@scaaf.day"],"from":"..."}
     try {
       const env = JSON.parse(toRaw)
       const arr = Array.isArray(env?.to) ? env.to : []
