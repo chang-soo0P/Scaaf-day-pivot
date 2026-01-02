@@ -1,44 +1,35 @@
 import { NextRequest, NextResponse } from "next/server"
-import crypto from "node:crypto"
+import crypto from "crypto"
 import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 
 export const runtime = "nodejs"
 
+// mailgun payload에서 첫 이메일만 뽑기
 function pickFirstEmail(v: string) {
   const first = v.split(",")[0]?.trim() ?? ""
   const m = first.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
   return (m?.[0] ?? first).toLowerCase()
 }
-
 function localPartOf(email: string) {
   const at = email.indexOf("@")
   return at >= 0 ? email.slice(0, at).toLowerCase() : email.toLowerCase()
 }
 
-function domainOf(email: string) {
-  const at = email.indexOf("@")
-  return at >= 0 ? email.slice(at + 1).toLowerCase() : ""
-}
-
-function safeEqualHex(aHex: string, bHex: string) {
-  const a = Uint8Array.from(Buffer.from(aHex, "hex"))
-  const b = Uint8Array.from(Buffer.from(bHex, "hex"))
-  if (a.length !== b.length) return false
-  return crypto.timingSafeEqual(a, b)
-}
-
+// ✅ Buffer 타입 이슈(네가 겪은 빨강) 회피: TextEncoder + timingSafeEqual
 function verifyMailgunSignature(params: Record<string, string>, signingKey: string) {
   const timestamp = params["timestamp"] ?? ""
   const token = params["token"] ?? ""
   const signature = params["signature"] ?? ""
   if (!timestamp || !token || !signature) return false
 
-  const hmac = crypto.createHmac("sha256", signingKey)
-  hmac.update(timestamp + token)
-  const digestHex = hmac.digest("hex")
+  const digest = crypto.createHmac("sha256", signingKey).update(timestamp + token).digest("hex")
 
   try {
-    return safeEqualHex(digestHex, signature)
+    const enc = new TextEncoder()
+    const a = enc.encode(digest)
+    const b = enc.encode(signature)
+    if (a.length !== b.length) return false
+    return crypto.timingSafeEqual(a, b)
   } catch {
     return false
   }
@@ -47,22 +38,35 @@ function verifyMailgunSignature(params: Record<string, string>, signingKey: stri
 export async function POST(req: NextRequest) {
   const supabase = createSupabaseAdminClient()
 
-  // Mailgun inbound: multipart/form-data
-  const form = await req.formData()
+  // Mailgun inbound은 보통 multipart/form-data
+  let form: FormData
+  try {
+    form = await req.formData()
+  } catch {
+    return NextResponse.json({ ok: false, error: "Expected form-data" }, { status: 400 })
+  }
+
   const payload: Record<string, string> = {}
   form.forEach((value, key) => {
     payload[key] = typeof value === "string" ? value : ""
   })
 
-  // (권장) signature verify
+  // 1) signature verify (프로덕션에서는 켜는 게 정답)
   const signingKey = process.env.MAILGUN_WEBHOOK_SIGNING_KEY
   if (signingKey) {
     const ok = verifyMailgunSignature(payload, signingKey)
-    if (!ok) return NextResponse.json({ ok: false, error: "Invalid signature" }, { status: 401 })
+    if (!ok) {
+      return NextResponse.json({ ok: false, error: "Invalid signature" }, { status: 401 })
+    }
   }
 
-  // recipient(to) 추출
-  const toRaw = payload["recipient"] || payload["to"] || payload["To"] || payload["envelope"] || ""
+  // 2) recipient(to) 추출
+  const toRaw =
+    payload["recipient"] ||
+    payload["to"] ||
+    payload["To"] ||
+    payload["envelope"] ||
+    ""
 
   let toEmail = ""
   if (toRaw.startsWith("{")) {
@@ -83,23 +87,22 @@ export async function POST(req: NextRequest) {
   }
 
   const local = localPartOf(toEmail)
-  const domain = domainOf(toEmail)
 
-  // addresses 매칭 (B안: 실제 도메인 scaaf.day 기준)
+  // 3) addresses 매칭
   const { data: address, error: addrErr } = await supabase
     .from("addresses")
-    .select("id, status, domain")
+    .select("id, status")
     .eq("local_part", local)
-    .eq("domain", domain) // 중요
     .maybeSingle()
 
   if (addrErr) return NextResponse.json({ ok: false, error: addrErr.message }, { status: 500 })
 
-  // 없거나 비활성: Mailgun 재시도 폭탄 방지 위해 200
+  // 없거나 비활성: Mailgun 재시도 폭탄 방지 위해 200으로 먹고 종료
   if (!address?.id || address.status !== "active") {
     return NextResponse.json({ ok: true, ignored: true }, { status: 200 })
   }
 
+  // 4) payload 정리
   const fromEmail = pickFirstEmail(String(payload["from"] || payload["From"] || ""))
   const subject = (payload["subject"] || payload["Subject"] || "").toString() || null
 
@@ -113,7 +116,7 @@ export async function POST(req: NextRequest) {
 
   const receivedAt = new Date().toISOString()
 
-  const insertRow = {
+  const insertRow: any = {
     address_id: address.id,
     user_id: null,
     message_id: messageId,
@@ -125,9 +128,23 @@ export async function POST(req: NextRequest) {
     received_at: receivedAt,
   }
 
-  const { error: insErr } = await supabase.from("inbox_emails").insert(insertRow)
-  if (insErr) return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
+  // to_address 컬럼이 있을 수도/없을 수도 → 있으면 넣고, 에러면 제거 후 재시도
+  insertRow.to_address = toEmail
 
+  const { error: insErr } = await supabase.from("inbox_emails").insert(insertRow)
+
+  if (insErr) {
+    const msg = String(insErr.message || "").toLowerCase()
+    if (msg.includes("to_address")) {
+      delete insertRow.to_address
+      const { error: retryErr } = await supabase.from("inbox_emails").insert(insertRow)
+      if (retryErr) return NextResponse.json({ ok: false, error: retryErr.message }, { status: 500 })
+    } else {
+      return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
+    }
+  }
+
+  // 5) last_received_at 업데이트
   await supabase.from("addresses").update({ last_received_at: receivedAt }).eq("id", address.id)
 
   return NextResponse.json({ ok: true }, { status: 200 })
