@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import crypto from "crypto"
+import crypto from "node:crypto"
 import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 
 export const runtime = "nodejs"
@@ -15,6 +15,18 @@ function localPartOf(email: string) {
   return at >= 0 ? email.slice(0, at).toLowerCase() : email.toLowerCase()
 }
 
+function domainOf(email: string) {
+  const at = email.indexOf("@")
+  return at >= 0 ? email.slice(at + 1).toLowerCase() : ""
+}
+
+function safeEqualHex(aHex: string, bHex: string) {
+  const a = Uint8Array.from(Buffer.from(aHex, "hex"))
+  const b = Uint8Array.from(Buffer.from(bHex, "hex"))
+  if (a.length !== b.length) return false
+  return crypto.timingSafeEqual(a, b)
+}
+
 function verifyMailgunSignature(params: Record<string, string>, signingKey: string) {
   const timestamp = params["timestamp"] ?? ""
   const token = params["token"] ?? ""
@@ -23,21 +35,16 @@ function verifyMailgunSignature(params: Record<string, string>, signingKey: stri
 
   const hmac = crypto.createHmac("sha256", signingKey)
   hmac.update(timestamp + token)
-  const digest = hmac.digest("hex")
+  const digestHex = hmac.digest("hex")
 
-  // ✅ TS(최신 lib.dom)에서 Buffer 타입 호환 이슈 방지: Uint8Array로 비교
   try {
-    return crypto.timingSafeEqual(
-      new Uint8Array(Buffer.from(digest, "utf8")),
-      new Uint8Array(Buffer.from(signature, "utf8"))
-    )
+    return safeEqualHex(digestHex, signature)
   } catch {
     return false
   }
 }
 
 export async function POST(req: NextRequest) {
-  // ✅ inbound webhook은 로그인/쿠키 없음 → admin client 사용
   const supabase = createSupabaseAdminClient()
 
   // Mailgun inbound: multipart/form-data
@@ -47,22 +54,15 @@ export async function POST(req: NextRequest) {
     payload[key] = typeof value === "string" ? value : ""
   })
 
-  // 1) signature verify (있으면 검증)
-  const signingKey = process.env.MAILGUN_SIGNING_KEY
+  // (권장) signature verify
+  const signingKey = process.env.MAILGUN_WEBHOOK_SIGNING_KEY
   if (signingKey) {
     const ok = verifyMailgunSignature(payload, signingKey)
-    if (!ok) {
-      return NextResponse.json({ ok: false, error: "Invalid signature" }, { status: 401 })
-    }
+    if (!ok) return NextResponse.json({ ok: false, error: "Invalid signature" }, { status: 401 })
   }
 
-  // 2) recipient(to) 추출
-  const toRaw =
-    payload["recipient"] ||
-    payload["to"] ||
-    payload["To"] ||
-    payload["envelope"] ||
-    ""
+  // recipient(to) 추출
+  const toRaw = payload["recipient"] || payload["to"] || payload["To"] || payload["envelope"] || ""
 
   let toEmail = ""
   if (toRaw.startsWith("{")) {
@@ -83,22 +83,23 @@ export async function POST(req: NextRequest) {
   }
 
   const local = localPartOf(toEmail)
+  const domain = domainOf(toEmail)
 
-  // 3) addresses 매칭
+  // addresses 매칭 (B안: 실제 도메인 scaaf.day 기준)
   const { data: address, error: addrErr } = await supabase
     .from("addresses")
-    .select("id, status")
+    .select("id, status, domain")
     .eq("local_part", local)
+    .eq("domain", domain) // 중요
     .maybeSingle()
 
   if (addrErr) return NextResponse.json({ ok: false, error: addrErr.message }, { status: 500 })
 
-  // 없거나 비활성: Mailgun 재시도 폭탄 방지 위해 200으로 먹고 종료
+  // 없거나 비활성: Mailgun 재시도 폭탄 방지 위해 200
   if (!address?.id || address.status !== "active") {
     return NextResponse.json({ ok: true, ignored: true }, { status: 200 })
   }
 
-  // 4) payload 정리
   const fromEmail = pickFirstEmail(String(payload["from"] || payload["From"] || ""))
   const subject = (payload["subject"] || payload["Subject"] || "").toString() || null
 
@@ -112,7 +113,7 @@ export async function POST(req: NextRequest) {
 
   const receivedAt = new Date().toISOString()
 
-  const insertRow: any = {
+  const insertRow = {
     address_id: address.id,
     user_id: null,
     message_id: messageId,
@@ -124,23 +125,9 @@ export async function POST(req: NextRequest) {
     received_at: receivedAt,
   }
 
-  // to_address 컬럼은 있을 수도/없을 수도 → 있으면 넣고, 에러면 제거 후 재시도
-  insertRow.to_address = toEmail
-
   const { error: insErr } = await supabase.from("inbox_emails").insert(insertRow)
+  if (insErr) return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
 
-  if (insErr) {
-    const msg = String(insErr.message || "").toLowerCase()
-    if (msg.includes("to_address")) {
-      delete insertRow.to_address
-      const { error: retryErr } = await supabase.from("inbox_emails").insert(insertRow)
-      if (retryErr) return NextResponse.json({ ok: false, error: retryErr.message }, { status: 500 })
-    } else {
-      return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
-    }
-  }
-
-  // 5) last_received_at 업데이트
   await supabase.from("addresses").update({ last_received_at: receivedAt }).eq("id", address.id)
 
   return NextResponse.json({ ok: true }, { status: 200 })
