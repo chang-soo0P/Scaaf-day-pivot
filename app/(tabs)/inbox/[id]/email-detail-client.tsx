@@ -212,6 +212,35 @@ function forceToggle(setter: (v: boolean | ((prev: boolean) => boolean)) => void
   setter((prev: boolean) => !prev)
 }
 
+/** iframe srcDoc builder: 원본 뉴스레터 레이아웃을 최대한 그대로 보여주되,
+ * - 부모 CSS 영향 최소화
+ * - 이미지/테이블 overflow 방지
+ * - 링크는 새 탭으로
+ */
+function buildEmailSrcDoc(innerHtml: string) {
+  const css = `
+    :root { color-scheme: light; }
+    html, body { margin: 0; padding: 0; background: transparent; }
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; line-height: 1.5; }
+    img { max-width: 100% !important; height: auto !important; }
+    table { max-width: 100% !important; }
+    * { box-sizing: border-box; }
+    a { word-break: break-word; overflow-wrap: anywhere; }
+  `
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<base target="_blank" />
+<style>${css}</style>
+</head>
+<body>
+${innerHtml}
+</body>
+</html>`
+}
+
 export default function EmailDetailClient({
   emailId,
   initialEmail = null,
@@ -234,7 +263,7 @@ export default function EmailDetailClient({
   const [loading, setLoading] = useState(!initialEmail && isValidEmailId)
   const [error, setError] = useState<string | null>(null)
 
-  // ✅ StrictMode 2회 실행 방지 가드
+  // ✅ StrictMode 2회 실행 방지 가드 (이메일 fetch는 유지 OK)
   const emailFetchedOnceRef = useRef(false)
 
   useEffect(() => {
@@ -294,34 +323,20 @@ export default function EmailDetailClient({
   const email = useMemo(() => mapDbEmailToView(dbEmail, emailId), [dbEmail, emailId])
 
   /** -----------------------------
-   * HTML original rendering
+   * Original HTML rendering
+   * - (Fix #3) iframe로 렌더링해 뉴스레터 원본 레이아웃/스페이서 박스 문제 최소화
+   * - iframe 내부 선택(하이라이트)을 부모로 전달
    * ------------------------------*/
+  const [isOriginalExpanded, setIsOriginalExpanded] = useState(false)
   const sanitizedHtml = useMemo(() => {
     const html = dbEmail?.body_html?.trim()
     if (!html) return ""
     return basicSanitizeHtml(html)
   }, [dbEmail?.body_html])
 
-  const bodyRef = useRef<HTMLDivElement>(null)
-  const [isOriginalExpanded, setIsOriginalExpanded] = useState(false)
-
-  useEffect(() => {
-    if (!isOriginalExpanded) return
-    const el = bodyRef.current
-    if (!el) return
-
-    el.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
-      a.setAttribute("target", "_blank")
-      a.setAttribute("rel", "noopener noreferrer")
-    })
-
-    el.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
-      img.setAttribute("loading", "lazy")
-      img.setAttribute("decoding", "async")
-      img.style.maxWidth = "100%"
-      img.style.height = "auto"
-    })
-  }, [isOriginalExpanded, sanitizedHtml])
+  const iframeRef = useRef<HTMLIFrameElement | null>(null)
+  const iframeCleanupRef = useRef<(() => void) | null>(null)
+  const [iframeHeight, setIframeHeight] = useState<number>(720)
 
   /** -----------------------------
    * Local UI state
@@ -329,6 +344,11 @@ export default function EmailDetailClient({
   const [showMoreSummary, setShowMoreSummary] = useState(false)
   const [selectedText, setSelectedText] = useState("")
   const [selectionPosition, setSelectionPosition] = useState<{ x: number; y: number } | null>(null)
+  const clearSelectionRef = useRef<() => void>(() => {
+    try {
+      window.getSelection()?.removeAllRanges()
+    } catch {}
+  })
 
   const [showShareModal, setShowShareModal] = useState(false)
   const [showCreateOptions, setShowCreateOptions] = useState(false)
@@ -402,9 +422,132 @@ export default function EmailDetailClient({
     }
   }, [openReactionFor])
 
-  // ✅ StrictMode 방지 가드
-  const highlightsFetchedOnceRef = useRef(false)
-  const commentsFetchedOnceRef = useRef(false)
+  /** -----------------------------
+   * (Fix #3) iframe 내부 selection → 부모로 전달 + height 자동 조절
+   * ------------------------------*/
+  const attachIframeHandlers = useCallback(() => {
+    // cleanup existing
+    if (iframeCleanupRef.current) {
+      iframeCleanupRef.current()
+      iframeCleanupRef.current = null
+    }
+
+    const iframe = iframeRef.current
+    if (!iframe) return
+
+    const win = iframe.contentWindow
+    const doc = iframe.contentDocument
+    if (!win || !doc) return
+
+    const updateHeight = () => {
+      try {
+        const h =
+          Math.max(doc.documentElement?.scrollHeight ?? 0, doc.body?.scrollHeight ?? 0) || 720
+        setIframeHeight(Math.min(Math.max(h, 320), 6000))
+      } catch {
+        // ignore
+      }
+    }
+
+    const handleSelectionFromIframe = () => {
+      try {
+        const sel = win.getSelection()
+        if (!sel || sel.rangeCount === 0) {
+          setSelectedText("")
+          setSelectionPosition(null)
+          return
+        }
+
+        const text = sel.toString().trim()
+        if (!text) {
+          setSelectedText("")
+          setSelectionPosition(null)
+          return
+        }
+
+        const range = sel.getRangeAt(0)
+        const rect = range.getBoundingClientRect()
+        const iframeRect = iframe.getBoundingClientRect()
+
+        setSelectedText(text)
+        setSelectionPosition({
+          x: iframeRect.left + rect.left + rect.width / 2,
+          y: iframeRect.top + rect.top - 10,
+        })
+
+        clearSelectionRef.current = () => {
+          try {
+            win.getSelection()?.removeAllRanges()
+          } catch {}
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // ResizeObserver로 내부 높이 변화 반영
+    let ro: ResizeObserver | null = null
+    if (typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(() => updateHeight())
+      try {
+        if (doc.documentElement) ro.observe(doc.documentElement)
+        if (doc.body) ro.observe(doc.body)
+      } catch {
+        // ignore
+      }
+    }
+
+    // 내부 링크에 rel 추가 (가능한 범위 내)
+    try {
+      doc.querySelectorAll<HTMLAnchorElement>("a[href]").forEach((a) => {
+        a.setAttribute("target", "_blank")
+        a.setAttribute("rel", "noopener noreferrer")
+      })
+      doc.querySelectorAll<HTMLImageElement>("img").forEach((img) => {
+        img.setAttribute("loading", "lazy")
+        img.setAttribute("decoding", "async")
+      })
+    } catch {
+      // ignore
+    }
+
+    doc.addEventListener("mouseup", handleSelectionFromIframe)
+    doc.addEventListener("touchend", handleSelectionFromIframe, { passive: true })
+    win.addEventListener("resize", updateHeight)
+
+    // initial
+    updateHeight()
+
+    iframeCleanupRef.current = () => {
+      try {
+        doc.removeEventListener("mouseup", handleSelectionFromIframe)
+        doc.removeEventListener("touchend", handleSelectionFromIframe as any)
+        win.removeEventListener("resize", updateHeight)
+      } catch {}
+      try {
+        ro?.disconnect()
+      } catch {}
+    }
+  }, [])
+
+  useEffect(() => {
+    // collapse 시 selection 정리
+    if (!isOriginalExpanded) {
+      if (iframeCleanupRef.current) {
+        iframeCleanupRef.current()
+        iframeCleanupRef.current = null
+      }
+      return
+    }
+
+    // expanded인데 html이 없으면 nothing
+    if (!sanitizedHtml) return
+
+    // iframe onLoad에서 attach
+    // (여기서는 혹시 이미 로드된 경우 대비)
+    const t = window.setTimeout(() => attachIframeHandlers(), 50)
+    return () => window.clearTimeout(t)
+  }, [isOriginalExpanded, sanitizedHtml, attachIframeHandlers])
 
   /** -----------------------------
    * circles load (when share modal opens)
@@ -473,7 +616,11 @@ export default function EmailDetailClient({
     }
   }
 
-  /** highlights load */
+  /** -----------------------------
+   * (Fix #2) highlights load: StrictMode 무한 Loading 방지
+   * - "ref로 1회만" 가드 제거
+   * - AbortController + finally에서 loading 해제
+   * ------------------------------*/
   useEffect(() => {
     if (!isValidEmailId) {
       setHighlights([])
@@ -481,48 +628,52 @@ export default function EmailDetailClient({
       return
     }
 
-    // ✅ 초기값이 있으면 첫 fetch 스킵
+    // ✅ 초기값이 있으면 사용
     if (initialHighlights?.length) {
+      setHighlights(initialHighlights)
       setHighlightsLoading(false)
       return
     }
 
-    // ✅ StrictMode 2회 실행 방지
-    if (highlightsFetchedOnceRef.current) return
-    highlightsFetchedOnceRef.current = true
-
     let cancelled = false
+    const ac = new AbortController()
+
     async function load() {
+      setHighlightsLoading(true)
       try {
-        setHighlightsLoading(true)
         const res = await fetch(`/api/inbox-emails/${emailId}/highlights`, {
           cache: "no-store",
           credentials: "include",
+          signal: ac.signal,
         })
         const data = await safeReadJson<ApiHighlightsListResponse>(res)
         if (cancelled) return
 
         if (!data.ok) {
           setHighlights([])
-          setHighlightsLoading(false)
           return
         }
 
         setHighlights(data.highlights ?? [])
-        setHighlightsLoading(false)
       } catch {
         if (cancelled) return
         setHighlights([])
-        setHighlightsLoading(false)
+      } finally {
+        if (!cancelled) setHighlightsLoading(false)
       }
     }
+
     load()
+
     return () => {
       cancelled = true
+      ac.abort()
     }
   }, [emailId, isValidEmailId, initialHighlights])
 
-  /** comments load */
+  /** -----------------------------
+   * (Fix #2) comments load도 동일 패턴
+   * ------------------------------*/
   useEffect(() => {
     if (!isValidEmailId) {
       setComments([])
@@ -530,48 +681,53 @@ export default function EmailDetailClient({
       return
     }
 
-    // ✅ 초기값이 있으면 첫 fetch 스킵
+    // ✅ 초기값이 있으면 사용
     if (initialComments?.length) {
+      setComments(initialComments)
       setCommentsLoading(false)
       return
     }
 
-    // ✅ StrictMode 2회 실행 방지
-    if (commentsFetchedOnceRef.current) return
-    commentsFetchedOnceRef.current = true
-
     let cancelled = false
+    const ac = new AbortController()
+
     async function load() {
+      setCommentsLoading(true)
       try {
-        setCommentsLoading(true)
         const res = await fetch(`/api/inbox-emails/${emailId}/comments`, {
           cache: "no-store",
           credentials: "include",
+          signal: ac.signal,
         })
         const data = await safeReadJson<ApiCommentsListResponse>(res)
         if (cancelled) return
 
         if (!data.ok) {
           setComments([])
-          setCommentsLoading(false)
           return
         }
 
         setComments(data.comments ?? [])
-        setCommentsLoading(false)
       } catch {
         if (cancelled) return
         setComments([])
-        setCommentsLoading(false)
+      } finally {
+        if (!cancelled) setCommentsLoading(false)
       }
     }
+
     load()
+
     return () => {
       cancelled = true
+      ac.abort()
     }
   }, [emailId, isValidEmailId, initialComments])
 
-  /** text selection */
+  /** -----------------------------
+   * text selection (parent document)
+   * - iframe selection은 별도 attachIframeHandlers에서 처리
+   * ------------------------------*/
   const handleTextSelection = useCallback(() => {
     const selection = window.getSelection()
     if (selection && selection.toString().trim().length > 0) {
@@ -582,6 +738,11 @@ export default function EmailDetailClient({
         x: rect.left + rect.width / 2,
         y: rect.top - 10,
       })
+      clearSelectionRef.current = () => {
+        try {
+          window.getSelection()?.removeAllRanges()
+        } catch {}
+      }
     } else {
       setSelectedText("")
       setSelectionPosition(null)
@@ -675,7 +836,7 @@ export default function EmailDetailClient({
     await createHighlight(selectedText)
     setSelectedText("")
     setSelectionPosition(null)
-    window.getSelection()?.removeAllRanges()
+    clearSelectionRef.current?.()
   }
 
   // ✅ 선택된 텍스트 “Share” = 하이라이트 공유 모드로 모달 오픈
@@ -686,7 +847,7 @@ export default function EmailDetailClient({
     setShowShareModal(true)
     setSelectedText("")
     setSelectionPosition(null)
-    window.getSelection()?.removeAllRanges()
+    clearSelectionRef.current?.()
   }
 
   const handleShareHighlight = (h: Highlight) => {
@@ -777,7 +938,9 @@ export default function EmailDetailClient({
       const data = await safeReadJson<ApiReactionToggleResponse>(res)
       if (!data.ok) throw new Error(data.error ?? "Failed to toggle reaction")
 
-      setComments((cur) => cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c)))
+      setComments((cur) =>
+        cur.map((c) => (c.id === commentId ? { ...c, reactions: data.reactions } : c))
+      )
     } catch {
       setComments(prev)
     }
@@ -837,7 +1000,15 @@ export default function EmailDetailClient({
             <h3 className="text-sm font-semibold text-foreground">AI Summary</h3>
           </div>
 
-          <p className={cn("text-sm text-foreground/80 leading-relaxed", !showMoreSummary && "line-clamp-3")}>
+          {/* ✅ Fix #1: 긴 URL/문자열 overflow 방지 */}
+          <p
+            className={cn(
+              "text-sm text-foreground/80 leading-relaxed max-w-full overflow-hidden whitespace-pre-wrap break-words [overflow-wrap:anywhere] [word-break:break-word]",
+              // URL 같은 "무구분 문자열"은 break-all이 가장 확실
+              "[&_*]:break-all",
+              !showMoreSummary && "line-clamp-3"
+            )}
+          >
             {email.summary}
           </p>
 
@@ -914,11 +1085,23 @@ export default function EmailDetailClient({
         {/* Original Email */}
         <div className="mb-6">
           <button
-            onClick={() => setIsOriginalExpanded(!isOriginalExpanded)}
+            onClick={() => {
+              setIsOriginalExpanded(!isOriginalExpanded)
+              // 접을 때 떠있는 플로팅 바/선택도 함께 정리
+              if (isOriginalExpanded) {
+                setSelectedText("")
+                setSelectionPosition(null)
+                clearSelectionRef.current?.()
+              }
+            }}
             className="flex w-full items-center justify-between rounded-xl bg-secondary/50 px-4 py-3"
           >
             <span className="text-sm font-medium text-foreground">Original email</span>
-            {isOriginalExpanded ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+            {isOriginalExpanded ? (
+              <ChevronUp className="h-4 w-4 text-muted-foreground" />
+            ) : (
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            )}
           </button>
 
           <AnimatePresence>
@@ -930,29 +1113,25 @@ export default function EmailDetailClient({
                 transition={{ duration: 0.2 }}
                 className="overflow-hidden"
               >
-                <div
-                  ref={bodyRef}
-                  className={cn(
-                    "mt-3 rounded-xl bg-card p-4 text-sm text-foreground/80 leading-relaxed",
-                    sanitizedHtml ? "whitespace-normal" : "whitespace-pre-wrap",
-                    "[&_*]:max-w-full [&_*]:break-words",
-                    "[&_p]:my-2 [&_br]:block",
-                    "[&_a]:text-primary [&_a]:underline [&_a:hover]:opacity-80",
-                    "[&_h1]:text-lg [&_h1]:font-semibold [&_h1]:my-3",
-                    "[&_h2]:text-base [&_h2]:font-semibold [&_h2]:my-3",
-                    "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:my-2",
-                    "[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2",
-                    "[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2",
-                    "[&_li]:my-1",
-                    "[&_blockquote]:border-l-2 [&_blockquote]:pl-3 [&_blockquote]:my-3 [&_blockquote]:text-muted-foreground",
-                    "[&_img]:rounded-lg [&_img]:my-3 [&_img]:h-auto",
-                    "[&_table]:w-full [&_table]:my-3 [&_table]:border-collapse",
-                    "[&_th]:border [&_td]:border [&_th]:p-2 [&_td]:p-2 [&_th]:bg-secondary/40",
-                    "[&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:bg-secondary/40 [&_pre]:p-3 [&_pre]:my-3",
-                    "[&_code]:rounded [&_code]:bg-secondary/40 [&_code]:px-1 [&_code]:py-0.5"
+                <div className="mt-3 rounded-xl bg-card p-3">
+                  {sanitizedHtml ? (
+                    // ✅ Fix #3: iframe로 원본 레이아웃 보존 + 더미 박스 문제 최소화
+                    <iframe
+                      ref={iframeRef}
+                      title="Original email"
+                      sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                      className="w-full rounded-lg border border-border/60 bg-transparent"
+                      style={{ height: iframeHeight }}
+                      srcDoc={buildEmailSrcDoc(sanitizedHtml)}
+                      onLoad={() => {
+                        attachIframeHandlers()
+                      }}
+                    />
+                  ) : (
+                    <div className="p-1 text-sm text-foreground/80 whitespace-pre-wrap break-words">
+                      {email.body}
+                    </div>
                   )}
-                >
-                  {sanitizedHtml ? <div className="space-y-3" dangerouslySetInnerHTML={{ __html: sanitizedHtml }} /> : email.body}
                 </div>
               </motion.div>
             )}
@@ -1005,7 +1184,9 @@ export default function EmailDetailClient({
                             onClick={() => toggleReaction(comment.id, reaction.emoji)}
                             className={cn(
                               "flex items-center gap-1 rounded-full px-2 py-0.5 text-xs transition-colors",
-                              reaction.reacted ? "bg-primary/20 text-primary" : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                              reaction.reacted
+                                ? "bg-primary/20 text-primary"
+                                : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
                             )}
                           >
                             <span>{reaction.emoji}</span>
@@ -1085,7 +1266,7 @@ export default function EmailDetailClient({
           onClose={() => {
             setSelectedText("")
             setSelectionPosition(null)
-            window.getSelection()?.removeAllRanges()
+            clearSelectionRef.current?.()
           }}
         />
       )}
@@ -1121,12 +1302,12 @@ export default function EmailDetailClient({
               {/* preview */}
               {shareTarget?.type === "highlight" && highlightToShare?.quote ? (
                 <div className="mb-4 rounded-xl bg-yellow-500/10 p-3 border-l-2 border-yellow-500">
-                  <p className="text-sm italic">"{highlightToShare.quote}"</p>
+                  <p className="text-sm italic break-words [overflow-wrap:anywhere]">"{highlightToShare.quote}"</p>
                 </div>
               ) : (
                 <div className="mb-4 rounded-xl bg-secondary/40 p-3">
                   <p className="text-xs text-muted-foreground mb-1">Sharing this email</p>
-                  <p className="text-sm font-medium">{email.subject}</p>
+                  <p className="text-sm font-medium break-words [overflow-wrap:anywhere]">{email.subject}</p>
                 </div>
               )}
 
@@ -1153,7 +1334,10 @@ export default function EmailDetailClient({
 
                           // ✅ duplicated 토스트 + 카운트
                           if (r.duplicated) {
-                            toast({ title: "Already shared", description: "This email is already shared to that circle." })
+                            toast({
+                              title: "Already shared",
+                              description: "This email is already shared to that circle.",
+                            })
                           } else {
                             toast({ title: "Shared to circle ✅", description: "Added to your circle feed." })
                             incrementCircleShares()
