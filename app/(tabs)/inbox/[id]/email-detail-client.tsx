@@ -728,7 +728,12 @@ export default function EmailDetailClient({
    * text selection (parent document)
    * - iframe selection은 별도 attachIframeHandlers에서 처리
    * ------------------------------*/
-  const handleTextSelection = useCallback(() => {
+  const handleTextSelection = useCallback((e?: MouseEvent | TouchEvent) => {
+    const target = (e?.target as HTMLElement | null) ?? null
+  
+    // ✅ Floating bar에서 발생한 mouseup/touchend는 무시 (selectedText를 지우지 않게)
+    if (target?.closest?.('[data-fhb="1"]')) return
+  
     const selection = window.getSelection()
     if (selection && selection.toString().trim().length > 0) {
       const range = selection.getRangeAt(0)
@@ -750,13 +755,16 @@ export default function EmailDetailClient({
   }, [])
 
   useEffect(() => {
-    document.addEventListener("mouseup", handleTextSelection)
-    document.addEventListener("touchend", handleTextSelection)
+    const onMouseUp = (e: MouseEvent) => handleTextSelection(e)
+    const onTouchEnd = (e: TouchEvent) => handleTextSelection(e)
+  
+    document.addEventListener("mouseup", onMouseUp)
+    document.addEventListener("touchend", onTouchEnd)
     return () => {
-      document.removeEventListener("mouseup", handleTextSelection)
-      document.removeEventListener("touchend", handleTextSelection)
+      document.removeEventListener("mouseup", onMouseUp)
+      document.removeEventListener("touchend", onTouchEnd)
     }
-  }, [handleTextSelection])
+  }, [handleTextSelection])  
 
   /** highlight CRUD */
   const createHighlight = async (quote: string) => {
@@ -1259,17 +1267,24 @@ export default function EmailDetailClient({
 
       {/* Floating Highlight Bar */}
       {selectedText && selectionPosition && (
-        <FloatingHighlightBar
-          position={selectionPosition}
-          onHighlight={handleHighlight}
-          onShare={handleShare}
-          onClose={() => {
-            setSelectedText("")
-            setSelectionPosition(null)
-            clearSelectionRef.current?.()
-          }}
-        />
-      )}
+  <div
+    data-fhb="1"
+    onMouseDownCapture={(e) => e.stopPropagation()}
+    onTouchStartCapture={(e) => e.stopPropagation()}
+  >
+    <FloatingHighlightBar
+      position={selectionPosition}
+      onHighlight={handleHighlight}
+      onShare={handleShare}
+      onClose={() => {
+        setSelectedText("")
+        setSelectionPosition(null)
+        clearSelectionRef.current?.()
+      }}
+    />
+  </div>
+)}
+
 
       {/* Share Modal */}
       <AnimatePresence>
