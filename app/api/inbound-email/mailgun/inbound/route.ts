@@ -20,12 +20,11 @@ function domainPartOf(email: string) {
   return at >= 0 ? email.slice(at + 1).toLowerCase() : ""
 }
 
-function verifyMailgunSignature(params: Record<string, string>, signingKeyRaw: string) {
-  const signingKey = signingKeyRaw.trim()
-  const timestamp = (params["timestamp"] ?? "").trim()
-  const token = (params["token"] ?? "").trim()
-  const signature = (params["signature"] ?? "").trim().toLowerCase()
-  if (!timestamp || !token || !signature || !signingKey) return false
+function verifyMailgunSignature(params: Record<string, string>, signingKey: string) {
+  const timestamp = params["timestamp"] ?? ""
+  const token = params["token"] ?? ""
+  const signature = params["signature"] ?? ""
+  if (!timestamp || !token || !signature) return false
 
   const digestHex = crypto
     .createHmac("sha256", signingKey)
@@ -33,6 +32,7 @@ function verifyMailgunSignature(params: Record<string, string>, signingKeyRaw: s
     .digest("hex")
 
   try {
+    // ✅ Node22+ 타입 이슈 회피: Buffer를 Uint8Array로 래핑
     const a = new Uint8Array(Buffer.from(digestHex, "hex"))
     const b = new Uint8Array(Buffer.from(signature, "hex"))
     if (a.length !== b.length) return false
@@ -51,16 +51,25 @@ export async function POST(req: NextRequest) {
     payload[key] = typeof value === "string" ? value : ""
   })
 
+  // ✅ env 이름 통일
   const signingKey =
-    (process.env.MAILGUN_WEBHOOK_SIGNING_KEY || process.env.MAILGUN_SIGNING_KEY || "").trim()
+    process.env.MAILGUN_WEBHOOK_SIGNING_KEY ||
+    process.env.MAILGUN_SIGNING_KEY ||
+    ""
 
+  // (옵션) signingKey가 있으면 검증. 없으면 개발 단계로 패스.
   if (signingKey) {
     const ok = verifyMailgunSignature(payload, signingKey)
     if (!ok) return NextResponse.json({ ok: false, error: "Invalid signature" }, { status: 401 })
   }
 
-  // recipient 추출
-  const toRaw = payload["recipient"] || payload["to"] || payload["To"] || payload["envelope"] || ""
+  // recipient 추출 (Mailgun: recipient / To / to / envelope)
+  const toRaw =
+    payload["recipient"] ||
+    payload["to"] ||
+    payload["To"] ||
+    payload["envelope"] ||
+    ""
 
   let toEmail = ""
   if (toRaw.startsWith("{")) {
@@ -80,56 +89,49 @@ export async function POST(req: NextRequest) {
   }
 
   const local = localPartOf(toEmail)
-  const domain = domainPartOf(toEmail) || (process.env.HOST_DOMAIN || "").trim() || "scaaf.day"
+  const domain = domainPartOf(toEmail)
 
-  // 1) addresses에서 “주소 자체” 찾기
-  const { data: address, error: addrErr } = await supabase
-    .from("addresses")
-    .select("id, status, domain, local_part")
-    .eq("local_part", local)
-    .eq("domain", domain)
-    .maybeSingle()
+  // ✅ B안 프로덕션: scaaf.day 주소만 받도록 (원하면 완화 가능)
+  const HOST_DOMAIN = (process.env.HOST_DOMAIN || "scaaf.day").toLowerCase()
+  if (domain !== HOST_DOMAIN) {
+    // 재시도 폭탄 방지: 200 OK로 무시
+    return NextResponse.json({ ok: true, ignored: true, reason: "domain_mismatch" }, { status: 200 })
+  }
 
-  if (addrErr) {
-    return NextResponse.json(
-      { ok: false, error: addrErr.message, stage: "select_addresses" },
-      { status: 500 }
-    )
+  // ✅ 핵심: addresses 테이블에서 “full_address” 우선 매칭 → 없으면 local_part+domain fallback
+  // (중요) user_addresses 테이블이 아니라 addresses 테이블이어야 FK가 맞음
+  let address: { id: string; status: string; user_id: string | null } | null = null
+
+  {
+    const { data, error } = await supabase
+      .from("addresses")
+      .select("id, status, user_id")
+      .eq("full_address", toEmail)
+      .maybeSingle()
+
+    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+    address = data ?? null
+  }
+
+  if (!address) {
+    const { data, error } = await supabase
+      .from("addresses")
+      .select("id, status, user_id")
+      .eq("local_part", local)
+      .eq("domain", HOST_DOMAIN)
+      .maybeSingle()
+
+    if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+    address = data ?? null
   }
 
   if (!address?.id || address.status !== "active") {
-    return NextResponse.json(
-      { ok: true, ignored: true, reason: "address_not_found_or_inactive", local, domain },
-      { status: 200 }
-    )
+    return NextResponse.json({ ok: true, ignored: true, reason: "address_inactive_or_missing" }, { status: 200 })
   }
 
-  // 2) user_addresses에서 “유저 귀속 매핑” 찾기
-  //    inbox_emails.address_id(FK)는 user_addresses.id를 참조하므로 이 값이 필요!
-  const { data: ua, error: uaErr } = await supabase
-    .from("user_addresses")
-    .select("id, user_id, status, address_id")
-    .eq("address_id", address.id)
-    .maybeSingle()
-
-  if (uaErr) {
-    return NextResponse.json(
-      { ok: false, error: uaErr.message, stage: "select_user_addresses" },
-      { status: 500 }
-    )
-  }
-
-  // 매핑이 없거나 비활성이면 저장하지 않음(재시도 폭탄 방지)
-  if (!ua?.id || !ua.user_id || (ua.status && ua.status !== "active")) {
-    return NextResponse.json(
-      {
-        ok: true,
-        ignored: true,
-        reason: "user_address_mapping_missing_or_inactive",
-        debug: { address_id: address.id, local, domain },
-      },
-      { status: 200 }
-    )
+  // ✅ user_id가 비어있으면 저장하지 않음 (폭탄 방지)
+  if (!address.user_id) {
+    return NextResponse.json({ ok: true, ignored: true, reason: "address_has_no_user_id" }, { status: 200 })
   }
 
   const fromEmail = pickFirstEmail(String(payload["from"] || payload["From"] || ""))
@@ -141,15 +143,13 @@ export async function POST(req: NextRequest) {
     (payload["stripped-html"] || payload["body-html"] || payload["html"] || "").toString() || null
 
   const messageId =
-    (payload["Message-Id"] || payload["message-id"] || payload["message_id"] || "").toString() ||
-    null
+    (payload["Message-Id"] || payload["message-id"] || payload["message_id"] || "").toString() || null
 
   const receivedAt = new Date().toISOString()
 
-  // ✅ 핵심: address_id에는 addresses.id가 아니라 user_addresses.id를 넣는다
-  const insertRow: any = {
-    address_id: ua.id, // ✅ FK 충족
-    user_id: ua.user_id, // ✅ not null 충족
+  const insertRow = {
+    address_id: address.id,          // ✅ 반드시 addresses.id
+    user_id: address.user_id,        // ✅ 반드시 addresses.user_id
     message_id: messageId,
     from_address: fromEmail || null,
     subject,
@@ -160,26 +160,9 @@ export async function POST(req: NextRequest) {
   }
 
   const { error: insErr } = await supabase.from("inbox_emails").insert(insertRow)
-  if (insErr) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: insErr.message,
-        stage: "insert_inbox_emails",
-        debug: {
-          toEmail,
-          local,
-          domain,
-          addresses_id: address.id,
-          user_addresses_id: ua.id,
-          user_id: ua.user_id,
-        },
-      },
-      { status: 500 }
-    )
-  }
+  if (insErr) return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
 
-  // 주소 테이블에 last_received_at이 있다면 업데이트(없으면 이 줄 제거)
+  // last_received_at 컬럼이 없을 수도 있으니 실패해도 무시
   await supabase.from("addresses").update({ last_received_at: receivedAt }).eq("id", address.id)
 
   return NextResponse.json({ ok: true }, { status: 200 })
