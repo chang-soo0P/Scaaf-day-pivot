@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
 
   const admin = createSupabaseAdminClient()
 
-  // ✅ circle_members.id ❌ → (circle_id, user_id)로 멤버십 체크
+  // ✅ 멤버십 체크: (circle_id, user_id)
   const { data: member, error: memErr } = await admin
     .from("circle_members")
     .select("circle_id, user_id")
@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
   if (memErr) return NextResponse.json({ ok: false, error: memErr.message }, { status: 500 })
   if (!member) return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 })
 
-  // ✅ 중복 공유 방지: 먼저 존재 여부 확인
+  // ✅ 중복 공유 방지
   const { data: existing, error: existErr } = await admin
     .from("circle_emails")
     .select("circle_id, email_id")
@@ -67,10 +67,14 @@ export async function POST(req: NextRequest) {
   if (existErr) return NextResponse.json({ ok: false, error: existErr.message }, { status: 500 })
   if (existing) return NextResponse.json({ ok: true, duplicated: true }, { status: 200 })
 
-  // ✅ insert (최소 컬럼만)
+  // ✅ 핵심: shared_by NOT NULL 채우기
   const { error: insErr } = await admin
     .from("circle_emails")
-    .insert({ circle_id: circleId, email_id: emailId })
+    .insert({
+      circle_id: circleId,
+      email_id: emailId,
+      shared_by: user.id, // ✅ 추가
+    })
 
   if (insErr) return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
 

@@ -1334,7 +1334,7 @@ export default function EmailDetailClient({
               ) : circles.length === 0 ? (
                 <div className="py-4 text-sm text-muted-foreground">No circles yet. Create or join a circle first.</div>
               ) : (
-                <div className="max-h-[50vh] overflow-y-auto pr-1 -mr-1">
+                <div className="max-h-[50vh] overflow-y-auto pr-1 -mr-1 pb-24">
                   <div className="space-y-2">
                     {circles.map((c) => (
                       <button
@@ -1374,7 +1374,7 @@ export default function EmailDetailClient({
                           router.refresh()
                         }}
                         className={cn(
-                          "w-full rounded-xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80",
+                          "w-full rounded-2xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80",
                           sharing && "opacity-60 cursor-not-allowed"
                         )}
                       >
