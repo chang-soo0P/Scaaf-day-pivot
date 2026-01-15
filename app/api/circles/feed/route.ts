@@ -1,112 +1,111 @@
 import { NextRequest, NextResponse } from "next/server"
-import { createSupabaseRouteClient } from "@/app/api/_supabase/route-client"
+import { cookies } from "next/headers"
+import { createServerClient } from "@supabase/ssr"
+import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 
-function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+export const runtime = "nodejs"
+type Ctx = { params: Promise<{ circleId: string }> } // Next15
+
+async function createSupabaseAuthedServerClient() {
+  const cookieStore = await cookies()
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value
+        },
+        set() {},
+        remove() {},
+      },
+    }
+  )
 }
 
-/**
- * cursor: epoch ms string
- * ex) "1734932155123"
- */
-function parseCursorMs(raw: string | null): number | null {
-  if (!raw) return null
-  const n = Number(raw)
-  if (!Number.isFinite(n) || n <= 0) return null
-  return n
+function buildSnippet(subject: string | null, bodyText: string | null) {
+  const src = (bodyText ?? subject ?? "").replace(/\s+/g, " ").trim()
+  return src.length > 90 ? src.slice(0, 90) + "…" : src
 }
 
-export async function GET(req: NextRequest) {
-  try {
-    const supabase = await createSupabaseRouteClient()
+export async function GET(req: NextRequest, ctx: Ctx) {
+  const { circleId } = await ctx.params
+  const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") ?? 20), 100)
 
-    const {
-      data: { user },
-      error: authErr,
-    } = await supabase.auth.getUser()
+  const supabaseAuth = await createSupabaseAuthedServerClient()
+  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
+  const user = userData?.user
+  if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
 
-    if (authErr) return NextResponse.json({ ok: false, error: authErr.message }, { status: 500 })
-    if (!user) return NextResponse.json({ ok: true, items: [], nextCursor: null }, { status: 200 })
+  const admin = createSupabaseAdminClient()
 
-    const { searchParams } = new URL(req.url)
-    const limit = Math.max(1, Math.min(50, Number(searchParams.get("limit") ?? "20") || 20))
-    const cursorMs = parseCursorMs(searchParams.get("cursor"))
-    const cursorIso = cursorMs ? new Date(cursorMs).toISOString() : null
+  // ✅ membership check
+  const { data: member, error: memErr } = await admin
+    .from("circle_members")
+    .select("circle_id")
+    .eq("circle_id", circleId)
+    .eq("user_id", user.id)
+    .maybeSingle()
 
-    // 1) 내 circle ids
-    const { data: memberships, error: mErr } = await supabase
-      .from("circle_members")
-      .select("circle_id")
-      .eq("user_id", user.id)
+  if (memErr) return NextResponse.json({ ok: false, error: memErr.message }, { status: 500 })
+  if (!member) return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 })
 
-    if (mErr) return NextResponse.json({ ok: false, error: mErr.message }, { status: 500 })
+  // 1) circle_emails
+  const { data: shares, error: sErr } = await admin
+    .from("circle_emails")
+    .select("email_id, shared_by, created_at")
+    .eq("circle_id", circleId)
+    .order("created_at", { ascending: false })
+    .limit(limit)
 
-    const circleIds = (memberships ?? [])
-      .map((m) => m.circle_id as string)
-      .filter((id) => isUuid(id))
+  if (sErr) return NextResponse.json({ ok: false, error: sErr.message }, { status: 500 })
 
-    if (circleIds.length === 0) {
-      return NextResponse.json({ ok: true, items: [], nextCursor: null }, { status: 200 })
+  const emailIds = (shares ?? []).map((r: any) => r.email_id).filter(Boolean)
+  if (emailIds.length === 0) return NextResponse.json({ ok: true, items: [] }, { status: 200 })
+
+  // 2) emails meta
+  const { data: emails, error: eErr } = await admin
+    .from("inbox_emails")
+    .select("id, from_address, subject, body_text, received_at")
+    .in("id", emailIds)
+
+  if (eErr) return NextResponse.json({ ok: false, error: eErr.message }, { status: 500 })
+
+  const emailMap = new Map((emails ?? []).map((e: any) => [e.id, e]))
+
+  // 3) counts (현재 유저 기준)
+  const { data: hRows } = await admin
+    .from("email_highlights")
+    .select("email_id")
+    .eq("user_id", user.id)
+    .in("email_id", emailIds)
+
+  const { data: cRows } = await admin
+    .from("email_comments")
+    .select("email_id")
+    .eq("user_id", user.id)
+    .in("email_id", emailIds)
+
+  const hCount: Record<string, number> = {}
+  for (const r of hRows ?? []) hCount[(r as any).email_id] = (hCount[(r as any).email_id] ?? 0) + 1
+
+  const cCount: Record<string, number> = {}
+  for (const r of cRows ?? []) cCount[(r as any).email_id] = (cCount[(r as any).email_id] ?? 0) + 1
+
+  // response
+  const items = (shares ?? []).map((s: any) => {
+    const e = emailMap.get(s.email_id)
+    return {
+      emailId: s.email_id,
+      sharedAt: s.created_at,
+      sender: e?.from_address ?? "Unknown",
+      subject: e?.subject ?? "(no subject)",
+      snippet: buildSnippet(e?.subject ?? null, e?.body_text ?? null),
+      highlightCount: hCount[s.email_id] ?? 0,
+      commentCount: cCount[s.email_id] ?? 0,
+      latestActivity: "", // MVP: 빈값 (원하면 다음 단계에서 채워줌)
     }
+  })
 
-    // 2) circle meta (이름)
-    const { data: circles, error: cErr } = await supabase
-      .from("circles")
-      .select("id,name")
-      .in("id", circleIds)
-
-    if (cErr) return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 })
-
-    const circleNameById = new Map((circles ?? []).map((c) => [c.id, c.name]))
-
-    // 3) feed rows
-    let q = supabase
-      .from("circle_emails")
-      .select("id,circle_id,email_id,shared_by,created_at")
-      .in("circle_id", circleIds)
-      .order("created_at", { ascending: false })
-      .limit(limit)
-
-    if (cursorIso) q = q.lt("created_at", cursorIso)
-
-    const { data: rows, error: fErr } = await q
-    if (fErr) return NextResponse.json({ ok: false, error: fErr.message }, { status: 500 })
-
-    const emailIds = (rows ?? [])
-      .map((r) => r.email_id as string)
-      .filter((id) => isUuid(id))
-
-    if (emailIds.length === 0) {
-      return NextResponse.json({ ok: true, items: [], nextCursor: null }, { status: 200 })
-    }
-
-    // 4) email info
-    const { data: emails, error: eErr } = await supabase
-      .from("inbox_emails")
-      .select("id,from_address,subject,received_at")
-      .in("id", emailIds)
-
-    if (eErr) return NextResponse.json({ ok: false, error: eErr.message }, { status: 500 })
-
-    const emailById = new Map((emails ?? []).map((e) => [e.id, e]))
-
-    const items = (rows ?? []).map((r) => ({
-      ...r,
-      circle_name: circleNameById.get(r.circle_id as string) ?? null,
-      email: emailById.get(r.email_id as string) ?? null,
-    }))
-
-    const last = rows && rows.length > 0 ? rows[rows.length - 1] : null
-    const nextCursor =
-      rows && rows.length === limit && last?.created_at
-        ? String(new Date(last.created_at as string).getTime())
-        : null
-
-    return NextResponse.json({ ok: true, items, nextCursor }, { status: 200 })
-  } catch (err: any) {
-    return NextResponse.json(
-      { ok: false, error: err?.message ?? "Unknown error", stack: err?.stack ?? null },
-      { status: 500 }
-    )
-  }
+  return NextResponse.json({ ok: true, items }, { status: 200 })
 }
