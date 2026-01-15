@@ -5,6 +5,7 @@ import Link from "next/link"
 import { emailDetailHref } from "@/lib/email-href"
 import { useParams } from "next/navigation"
 import { getEmailById, getEmailStats } from "@/lib/email-mock-data"
+import CircleFeedClient from "./circle-feed-client" // ✅ 추가
 
 type Member = {
   id: string
@@ -37,21 +38,9 @@ const circlesData: Record<string, CircleData> = {
       { id: "3", name: "David", color: "#10b981" },
     ],
     sharedNewsletterRefs: [
-      {
-        emailId: "nl-1", // Stratechery - AI in 2025
-        sharedAt: "2h ago",
-        latestActivity: "Marvin: This section on multimodal is key",
-      },
-      {
-        emailId: "nl-6", // The Information - OpenAI's next model
-        sharedAt: "5h ago",
-        latestActivity: "Jane highlighted 2 paragraphs",
-      },
-      {
-        emailId: "nl-9", // AI Weekly - Rise of AI agents
-        sharedAt: "1d ago",
-        latestActivity: "David: Great framework for PM's",
-      },
+      { emailId: "nl-1", sharedAt: "2h ago", latestActivity: "Marvin: This section on multimodal is key" },
+      { emailId: "nl-6", sharedAt: "5h ago", latestActivity: "Jane highlighted 2 paragraphs" },
+      { emailId: "nl-9", sharedAt: "1d ago", latestActivity: "David: Great framework for PM's" },
     ],
   },
   "macro-watchers": {
@@ -63,21 +52,9 @@ const circlesData: Record<string, CircleData> = {
       { id: "2", name: "Sophie", color: "#f59e0b" },
     ],
     sharedNewsletterRefs: [
-      {
-        emailId: "nl-3", // Korea Economic Daily - Samsung chips
-        sharedAt: "3h ago",
-        latestActivity: "Sophie highlighted a key insight",
-      },
-      {
-        emailId: "nl-2", // Morning Brew - Fed signals
-        sharedAt: "1d ago",
-        latestActivity: "Alex: Watch the Dec meeting",
-      },
-      {
-        emailId: "nl-7", // Bloomberg - Bond yields
-        sharedAt: "2d ago",
-        latestActivity: "Sophie: Yield curve telling us something",
-      },
+      { emailId: "nl-3", sharedAt: "3h ago", latestActivity: "Sophie highlighted a key insight" },
+      { emailId: "nl-2", sharedAt: "1d ago", latestActivity: "Alex: Watch the Dec meeting" },
+      { emailId: "nl-7", sharedAt: "2d ago", latestActivity: "Sophie: Yield curve telling us something" },
     ],
   },
   "tech-founders": {
@@ -92,16 +69,8 @@ const circlesData: Record<string, CircleData> = {
       { id: "5", name: "Morgan", color: "#3b82f6" },
     ],
     sharedNewsletterRefs: [
-      {
-        emailId: "nl-4", // TechCrunch - YC Winter 2025
-        sharedAt: "2h ago",
-        latestActivity: "Alex shared a highlight",
-      },
-      {
-        emailId: "nl-5", // The Hustle - Remote work
-        sharedAt: "6h ago",
-        latestActivity: "Sam: This changed how I think about PMF",
-      },
+      { emailId: "nl-4", sharedAt: "2h ago", latestActivity: "Alex shared a highlight" },
+      { emailId: "nl-5", sharedAt: "6h ago", latestActivity: "Sam: This changed how I think about PMF" },
     ],
   },
   "design-team": {
@@ -114,17 +83,13 @@ const circlesData: Record<string, CircleData> = {
       { id: "3", name: "Jamie", color: "#f43f5e" },
       { id: "4", name: "Drew", color: "#0ea5e9" },
     ],
-    sharedNewsletterRefs: [
-      {
-        emailId: "nl-5", // The Hustle - Remote work (for design team perspective)
-        sharedAt: "4h ago",
-        latestActivity: "Casey: Great article on design systems!",
-      },
-    ],
+    sharedNewsletterRefs: [{ emailId: "nl-5", sharedAt: "4h ago", latestActivity: "Casey: Great article on design systems!" }],
   },
 }
 
-function getSharedNewsletters(refs: SharedNewsletterRef[]): Array<{
+function getSharedNewsletters(
+  refs: SharedNewsletterRef[]
+): Array<{
   id: string
   emailId: string
   title: string
@@ -140,7 +105,6 @@ function getSharedNewsletters(refs: SharedNewsletterRef[]): Array<{
     .map((ref, index) => {
       const email = getEmailById(ref.emailId)
       if (!email) return null
-
       const stats = getEmailStats(ref.emailId)
 
       return {
@@ -179,7 +143,6 @@ function SharedNewsletterCard({
   return (
     <Link href={href ?? "#"}>
       <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border transition-shadow hover:shadow-md">
-        {/* Header: sender icon + sender name + time */}
         <div className="flex items-center gap-2 mb-2">
           <div className="flex h-6 w-6 items-center justify-center rounded-md bg-secondary text-[10px] font-semibold text-muted-foreground">
             {newsletter.senderIcon}
@@ -189,10 +152,8 @@ function SharedNewsletterCard({
           <span className="text-xs text-muted-foreground">{newsletter.sharedAt}</span>
         </div>
 
-        {/* Title */}
         <h3 className="font-medium text-card-foreground line-clamp-2 mb-2">{newsletter.title}</h3>
 
-        {/* Topics */}
         <div className="flex flex-wrap gap-1.5 mb-3">
           {newsletter.topics.map((topic) => (
             <span
@@ -204,7 +165,6 @@ function SharedNewsletterCard({
           ))}
         </div>
 
-        {/* Stats row */}
         <div className="flex items-center gap-3 text-xs text-muted-foreground mb-2">
           <span className="flex items-center gap-1">
             <Highlighter className="h-3.5 w-3.5" />
@@ -216,7 +176,6 @@ function SharedNewsletterCard({
           </span>
         </div>
 
-        {/* Latest activity */}
         <p className="text-sm text-muted-foreground truncate">{newsletter.latestActivity}</p>
       </div>
     </Link>
@@ -225,7 +184,10 @@ function SharedNewsletterCard({
 
 export default function CircleDetailPage() {
   const params = useParams()
-  const circleId = params.circleId as string
+
+  // ✅ 폴더명이 [circlesID]면 params.circlesID 가 들어올 가능성이 큼
+  // ✅ 혹시 기존에 circleId로 쓰고 있다면 둘 다 대응
+  const circleId = (params?.circlesID ?? params?.circleId ?? "ai-builders") as string
 
   const circle = circlesData[circleId] || circlesData["ai-builders"]
   const sharedNewsletters = getSharedNewsletters(circle.sharedNewsletterRefs)
@@ -245,7 +207,7 @@ export default function CircleDetailPage() {
             <h1 className="font-semibold text-foreground">{circle.name}</h1>
             <p className="text-xs text-muted-foreground">{circle.description}</p>
           </div>
-          {/* Stacked avatars in header */}
+
           <div className="flex -space-x-1.5">
             {circle.members.slice(0, 3).map((member, index) => (
               <div
@@ -263,20 +225,26 @@ export default function CircleDetailPage() {
             )}
           </div>
         </div>
-        {/* Member count */}
+
         <p className="mt-2 text-xs text-muted-foreground pl-[52px]">
           {circle.members.length} members · {sharedNewsletters.length} shared newsletters
         </p>
       </header>
 
-      {/* Shared newsletters list */}
+      {/* Body */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
+        {/* ✅ (NEW) 실제 Circle Feed 섹션 */}
+        <div className="mb-6">
+          <CircleFeedClient circleId={circleId} />
+        </div>
+
+        {/* 기존 mock shared newsletters 리스트 (유지) */}
         <div className="flex flex-col gap-4">
           {sharedNewsletters.map((newsletter) => (
             <SharedNewsletterCard key={newsletter.id} newsletter={newsletter} />
           ))}
         </div>
-        {/* Bottom padding for safe area */}
+
         <div className="h-24" />
       </div>
     </div>

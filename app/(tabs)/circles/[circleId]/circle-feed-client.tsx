@@ -5,115 +5,138 @@ import Link from "next/link"
 import { cn } from "@/lib/utils"
 
 type FeedItem = {
+  id: string
+  circleId: string
   emailId: string
+  sharedBy: string | null
   sharedAt: string
-  sharedBy: string
-  sharedByName: string
-  subject: string
-  fromAddress: string
-  receivedAt: string | null
+  email: {
+    id: string
+    subject: string
+    from: string | null
+    receivedAt: string | null
+    snippet: string | null
+  } | null
 }
 
-type Api = {
-  ok: true
-  circle: { id: string; name: string | null; slug: string | null }
-  feed: FeedItem[]
-} | { ok: false; error?: string }
+type ApiResponse = { ok: true; items: FeedItem[] } | { ok: false; error?: string }
 
-function formatTime(iso: string) {
-  const d = new Date(iso)
-  return d.toLocaleString([], { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+function formatTimeRelative(dateStr: string) {
+  const date = new Date(dateStr)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMins = Math.floor(diffMs / 60000)
+  const diffHours = Math.floor(diffMs / 3600000)
+  if (diffMins < 60) return `${diffMins}m ago`
+  if (diffHours < 24) return `${diffHours}h ago`
+  return date.toLocaleDateString()
 }
 
-export default function CircleFeedClient({ circlesID }: { circlesID: string }) {
+export default function CircleFeedClient({ circleId }: { circleId: string }) {
+  const [items, setItems] = useState<FeedItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [feed, setFeed] = useState<FeedItem[]>([])
-  const [circleName, setCircleName] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
+
     async function run() {
       try {
         setLoading(true)
         setError(null)
 
-        const res = await fetch(`/api/circles/${circlesID}/feed?limit=50`, {
+        const res = await fetch(`/api/circles/${circleId}/feed?limit=20`, {
           cache: "no-store",
           credentials: "include",
         })
-        const data: Api = await res.json().catch(async () => ({ ok: false, error: await res.text() } as any))
+        const text = await res.text()
+        const data = (() => {
+          try {
+            return JSON.parse(text) as ApiResponse
+          } catch {
+            return { ok: false, error: text || `HTTP ${res.status}` } as ApiResponse
+          }
+        })()
 
         if (cancelled) return
-
-        if (!res.ok || !("ok" in data) || !data.ok) {
-          setError((data as any)?.error ?? `HTTP ${res.status}`)
-          setFeed([])
-          setCircleName(null)
+        if (!data.ok) {
+          setItems([])
+          setError(data.error ?? `HTTP ${res.status}`)
           setLoading(false)
           return
         }
 
-        setCircleName(data.circle?.name ?? null)
-        setFeed(data.feed ?? [])
+        setItems(data.items ?? [])
         setLoading(false)
       } catch (e: any) {
         if (cancelled) return
+        setItems([])
         setError(e?.message ?? "Failed to load feed")
-        setFeed([])
-        setCircleName(null)
         setLoading(false)
       }
     }
 
     run()
-    return () => { cancelled = true }
-  }, [circlesID])
+    return () => {
+      cancelled = true
+    }
+  }, [circleId])
 
   return (
     <div className="mt-4">
       <div className="mb-3 flex items-end justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-foreground">Shared Emails</h2>
-          {circleName ? <p className="text-xs text-muted-foreground">{circleName}</p> : null}
-        </div>
-        <span className="text-xs text-muted-foreground">{feed.length} items</span>
+        <h3 className="text-sm font-semibold text-foreground">Shared Feed</h3>
+        <span className="text-xs text-muted-foreground">
+          {loading ? "Loading…" : `${items.length} items`}
+        </span>
       </div>
 
-      {loading ? (
-        <div className="rounded-2xl border border-border bg-card p-4 text-sm text-muted-foreground">Loading feed…</div>
-      ) : error ? (
-        <div className="rounded-2xl border border-destructive/40 bg-card p-4 text-sm">
-          <div className="font-semibold text-destructive">Feed load failed</div>
-          <div className="mt-1 text-muted-foreground">{error}</div>
+      {error ? (
+        <div className="rounded-xl border border-border bg-card p-4 text-sm text-destructive">
+          {error}
         </div>
-      ) : feed.length === 0 ? (
-        <div className="rounded-2xl border border-border bg-card p-4 text-sm text-muted-foreground">
-          No shared emails yet. Share an email to this circle!
+      ) : loading ? (
+        <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+          Loading…
+        </div>
+      ) : items.length === 0 ? (
+        <div className="rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+          No shared emails yet.
         </div>
       ) : (
         <div className="space-y-2">
-          {feed.map((item) => (
-            <Link
-              key={`${item.emailId}-${item.sharedAt}`}
-              href={`/inbox/${item.emailId}`}
-              className={cn(
-                "block rounded-2xl border border-border bg-card p-4",
-                "hover:bg-secondary/40 transition-colors"
-              )}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-foreground truncate">{item.subject}</div>
-                  <div className="mt-1 text-xs text-muted-foreground truncate">{item.fromAddress}</div>
+          {items.map((it) => {
+            const e = it.email
+            return (
+              <Link
+                key={it.id}
+                href={e?.id ? `/inbox/${e.id}` : "#"}
+                className={cn(
+                  "block rounded-xl bg-card p-3 ring-1 ring-border/60 hover:bg-secondary/30 transition",
+                  !e?.id && "pointer-events-none opacity-60"
+                )}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-foreground">
+                      {e?.subject ?? "(missing email)"}
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-2 text-xs text-muted-foreground">
+                      <span className="truncate">{e?.from ?? "Unknown"}</span>
+                      <span>•</span>
+                      <span>{formatTimeRelative(it.sharedAt)}</span>
+                    </div>
+                  </div>
                 </div>
-                <div className="shrink-0 text-right">
-                  <div className="text-xs text-muted-foreground">{item.sharedByName}</div>
-                  <div className="text-[11px] text-muted-foreground">{formatTime(item.sharedAt)}</div>
-                </div>
-              </div>
-            </Link>
-          ))}
+
+                {e?.snippet ? (
+                  <div className="mt-2 line-clamp-2 text-xs text-foreground/70">
+                    {e.snippet}
+                  </div>
+                ) : null}
+              </Link>
+            )
+          })}
         </div>
       )}
     </div>
