@@ -111,7 +111,7 @@ export default function CircleDetailPage() {
   const params = useParams()
 
   // ✅ 폴더명이 [circlesID] 이므로 여기 키도 circlesID
-  const circleId = String((params as any)?.circlesID ?? "").trim()
+  const circleId = String((params as any)?.circleId ?? (params as any)?.id ?? "").trim()
 
   const [circle, setCircle] = useState<Circle | null>(null)
   const [feed, setFeed] = useState<FeedItem[]>([])
