@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { X, Link2, Check } from "lucide-react"
 import { CircleCard } from "@/components/circle-card"
 
@@ -21,72 +21,77 @@ type Member = {
   color: string
 }
 
-type Circle = {
-  id: string
+type CircleUI = {
+  id: string // ✅ uuid
   name: string
-  members: Member[]
+  members: Member[] // UI용(실제 멤버 목록이 API에 없으면 placeholder)
   sharedNewsletterCount: number
   latestActivity: string
   hasUnread?: boolean
 }
 
-const circles: Circle[] = [
-  {
-    id: "ai-builders",
-    name: "AI Builders",
-    members: [
-      { id: "1", name: "Marvin", color: "#6366f1" },
-      { id: "2", name: "Jane", color: "#ec4899" },
-      { id: "3", name: "David", color: "#10b981" },
-    ],
-    sharedNewsletterCount: 8,
-    latestActivity: "Marvin commented on AI in 2025: What's next",
-    hasUnread: true,
-  },
-  {
-    id: "macro-watchers",
-    name: "Macro Watchers",
-    members: [
-      { id: "1", name: "Alex", color: "#3b82f6" },
-      { id: "2", name: "Sophie", color: "#f59e0b" },
-    ],
-    sharedNewsletterCount: 5,
-    latestActivity: "Sophie highlighted a paragraph from The Korean stock wave",
-    hasUnread: false,
-  },
-  {
-    id: "tech-founders",
-    name: "Tech Founders",
-    members: [
-      { id: "1", name: "Alex", color: "#6366f1" },
-      { id: "2", name: "Sam", color: "#ec4899" },
-      { id: "3", name: "Jordan", color: "#10b981" },
-      { id: "4", name: "Taylor", color: "#f59e0b" },
-      { id: "5", name: "Morgan", color: "#3b82f6" },
-    ],
-    sharedNewsletterCount: 12,
-    latestActivity: "Alex shared a highlight from Stratechery",
-    hasUnread: true,
-  },
-  {
-    id: "design-team",
-    name: "Design Team",
-    members: [
-      { id: "1", name: "Casey", color: "#8b5cf6" },
-      { id: "2", name: "Riley", color: "#14b8a6" },
-      { id: "3", name: "Jamie", color: "#f43f5e" },
-      { id: "4", name: "Drew", color: "#0ea5e9" },
-    ],
-    sharedNewsletterCount: 6,
-    latestActivity: "Great article on design systems!",
-    hasUnread: false,
-  },
-]
+/** API 응답은 프로젝트마다 조금씩 달라서 넓게 수용 */
+type ApiCircle = {
+  id: string
+  name?: string | null
+  title?: string | null
+  memberCount?: number | null
+  members_count?: number | null
+  sharedNewsletterCount?: number | null
+  shared_newsletter_count?: number | null
+  sharedCount?: number | null
+  latestActivity?: string | null
+  latest_activity?: string | null
+  hasUnread?: boolean | null
+}
+
+type ApiResponse =
+  | { ok: true; circles: ApiCircle[] }
+  | { ok: false; error?: string }
+
+const AVATAR_COLORS = ["#6366f1", "#ec4899", "#10b981", "#f59e0b", "#3b82f6", "#8b5cf6", "#14b8a6", "#f43f5e"] as const
+
+function safePickNumber(...vals: Array<number | null | undefined>): number {
+  for (const v of vals) {
+    if (typeof v === "number" && Number.isFinite(v)) return v
+  }
+  return 0
+}
+
+function safePickString(...vals: Array<string | null | undefined>): string {
+  for (const v of vals) {
+    if (typeof v === "string" && v.trim()) return v.trim()
+  }
+  return ""
+}
+
+function buildPlaceholderMembers(count: number): Member[] {
+  const n = Math.max(0, Math.min(count, 4)) // UI는 3~4명만 보이면 충분
+  return Array.from({ length: n }).map((_, idx) => ({
+    id: `placeholder-${idx}`,
+    name: String.fromCharCode(65 + idx), // A,B,C...
+    color: AVATAR_COLORS[idx % AVATAR_COLORS.length],
+  }))
+}
+
+async function readJson(res: Response): Promise<any> {
+  const text = await res.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    return { ok: false, error: text || `HTTP ${res.status}` }
+  }
+}
 
 export default function CirclesPage() {
   const [isFriendsModalOpen, setIsFriendsModalOpen] = useState(false)
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false)
   const [copied, setCopied] = useState(false)
+
+  // ✅ DB 연동 circles
+  const [circles, setCircles] = useState<CircleUI[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const handleCopyLink = async () => {
     try {
@@ -99,15 +104,80 @@ export default function CirclesPage() {
     }
   }
 
-  const handleCreateCircle = () => {
-    console.log("Create circle clicked")
-  }
+  useEffect(() => {
+    let cancelled = false
+
+    async function run() {
+      setLoading(true)
+      setError(null)
+
+      try {
+        const res = await fetch("/api/circles?limit=50", {
+          method: "GET",
+          cache: "no-store",
+          credentials: "include",
+        })
+
+        const data = (await readJson(res)) as ApiResponse
+
+        if (cancelled) return
+
+        if (!res.ok || !data || (data as any).ok !== true) {
+          setError((data as any)?.error ?? `Failed to load circles (HTTP ${res.status})`)
+          setCircles([])
+          setLoading(false)
+          return
+        }
+
+        const rows = (data as any).circles as ApiCircle[]
+
+        const mapped: CircleUI[] = (rows ?? []).map((c) => {
+          const name = safePickString(c.name, c.title) || "Untitled circle"
+          const memberCount = safePickNumber(c.memberCount, c.members_count)
+          const sharedCount = safePickNumber(
+            c.sharedNewsletterCount,
+            c.shared_newsletter_count,
+            c.sharedCount
+          )
+          const latest = safePickString(c.latestActivity, c.latest_activity) || "No recent activity"
+
+          return {
+            id: c.id, // ✅ uuid 그대로
+            name,
+            members: buildPlaceholderMembers(memberCount || 0),
+            sharedNewsletterCount: sharedCount,
+            latestActivity: latest,
+            hasUnread: Boolean(c.hasUnread),
+          }
+        })
+
+        setCircles(mapped)
+        setLoading(false)
+      } catch (e: any) {
+        if (cancelled) return
+        setError(e?.message ?? "Failed to load circles")
+        setCircles([])
+        setLoading(false)
+      }
+    }
+
+    run()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const headerSubtitle = useMemo(() => {
+    if (loading) return "Loading your circles…"
+    if (error) return "Failed to load circles"
+    return "Browse what your groups are reading"
+  }, [loading, error])
 
   return (
     <div className="mx-auto max-w-lg px-4 py-6">
       <div className="mb-6">
         <h2 className="text-2xl font-semibold tracking-tight text-foreground">Circles</h2>
-        <p className="mt-1 text-sm text-muted-foreground">Browse what your groups are reading</p>
+        <p className="mt-1 text-sm text-muted-foreground">{headerSubtitle}</p>
       </div>
 
       <div className="mb-6 rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border">
@@ -134,7 +204,7 @@ export default function CirclesPage() {
             )}
           </div>
         </div>
-        {/* Two action buttons */}
+
         <div className="flex gap-2">
           <button
             type="button"
@@ -153,30 +223,33 @@ export default function CirclesPage() {
         </div>
       </div>
 
-      {/* 
-      <button
-        type="button"
-        onClick={handleCreateCircle}
-        className="mb-6 flex w-full items-center justify-center gap-2 rounded-2xl bg-primary py-3.5 font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-      >
-        <Plus className="h-5 w-5" />
-        Create circle
-      </button>
-      */}
-
-      <div className="flex flex-col gap-3">
-        {circles.map((circle) => (
-          <CircleCard
-            key={circle.id}
-            id={circle.id}
-            name={circle.name}
-            members={circle.members}
-            sharedNewsletterCount={circle.sharedNewsletterCount}
-            latestActivity={circle.latestActivity}
-            hasUnread={circle.hasUnread}
-          />
-        ))}
-      </div>
+      {/* Circles list */}
+      {loading ? (
+        <div className="rounded-2xl bg-card p-4 text-sm text-muted-foreground ring-1 ring-border">Loading…</div>
+      ) : error ? (
+        <div className="rounded-2xl bg-card p-4 ring-1 ring-border">
+          <div className="text-sm font-semibold text-foreground">Failed to load</div>
+          <div className="mt-1 text-sm text-muted-foreground">{error}</div>
+        </div>
+      ) : circles.length === 0 ? (
+        <div className="rounded-2xl bg-card p-4 text-sm text-muted-foreground ring-1 ring-border">
+          No circles yet.
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          {circles.map((circle) => (
+            <CircleCard
+              key={circle.id}
+              id={circle.id} // ✅ 이제 uuid가 들어감 → 링크가 /circles/<uuid>로 바뀜
+              name={circle.name}
+              members={circle.members}
+              sharedNewsletterCount={circle.sharedNewsletterCount}
+              latestActivity={circle.latestActivity}
+              hasUnread={circle.hasUnread}
+            />
+          ))}
+        </div>
+      )}
 
       {isFriendsModalOpen && (
         <div
@@ -184,7 +257,6 @@ export default function CirclesPage() {
           onClick={() => setIsFriendsModalOpen(false)}
         >
           <div className="w-full max-w-lg rounded-t-3xl bg-background pb-8" onClick={(e) => e.stopPropagation()}>
-            {/* Modal header */}
             <div className="flex items-center justify-between border-b border-border px-4 py-4">
               <h3 className="text-lg font-semibold text-foreground">Friend list</h3>
               <button
@@ -195,7 +267,7 @@ export default function CirclesPage() {
                 <X className="h-5 w-5 text-muted-foreground" />
               </button>
             </div>
-            {/* Friend list */}
+
             <div className="max-h-[60vh] overflow-y-auto px-4">
               {friends.map((friend) => (
                 <div key={friend.id} className="flex items-center gap-3 border-b border-border py-3 last:border-b-0">
@@ -212,7 +284,7 @@ export default function CirclesPage() {
                 </div>
               ))}
             </div>
-            {/* Close button */}
+
             <div className="px-4 pt-4">
               <button
                 type="button"
@@ -232,7 +304,6 @@ export default function CirclesPage() {
           onClick={() => setIsInviteModalOpen(false)}
         >
           <div className="w-full max-w-lg rounded-t-3xl bg-background pb-8" onClick={(e) => e.stopPropagation()}>
-            {/* Modal header */}
             <div className="flex items-center justify-between border-b border-border px-4 py-4">
               <h3 className="text-lg font-semibold text-foreground">Invite friends</h3>
               <button
@@ -243,17 +314,17 @@ export default function CirclesPage() {
                 <X className="h-5 w-5 text-muted-foreground" />
               </button>
             </div>
-            {/* Invite content */}
+
             <div className="px-4 pt-4">
               <p className="mb-4 text-sm text-muted-foreground">
                 Copy the invite link below and share via iMessage, WhatsApp, etc.
               </p>
-              {/* Deep link display */}
+
               <div className="mb-4 flex items-center gap-2 rounded-xl bg-secondary p-3">
                 <Link2 className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="flex-1 truncate text-sm text-foreground">scaaf.day/join?ref=marvin123</span>
               </div>
-              {/* Copy button */}
+
               <button
                 type="button"
                 onClick={handleCopyLink}
@@ -271,7 +342,7 @@ export default function CirclesPage() {
                 )}
               </button>
             </div>
-            {/* Close button */}
+
             <div className="px-4 pt-4">
               <button
                 type="button"
