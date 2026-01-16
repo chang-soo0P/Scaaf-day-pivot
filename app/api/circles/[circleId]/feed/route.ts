@@ -5,13 +5,15 @@ import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 
 export const runtime = "nodejs"
 
-type Ctx = { params: Promise<{ circleId: string }> } // Next15 params Promise
+type Ctx = { params: Promise<{ circleId: string }> } // ✅ Next15 params Promise
 
 const isUuid = (v: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
 
 async function createSupabaseAuthedServerClient() {
+  // ✅ Next15: cookies() is Promise
   const cookieStore = await cookies()
+
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -28,39 +30,33 @@ async function createSupabaseAuthedServerClient() {
 }
 
 export async function GET(req: NextRequest, ctx: Ctx) {
-  const { circleId: circleIdOrSlug } = await ctx.params
-  const url = new URL(req.url)
-  const limit = Math.min(Number(url.searchParams.get("limit") ?? "20") || 20, 50)
+  const { circleId } = await ctx.params
+  const limit = Number(new URL(req.url).searchParams.get("limit") ?? "20")
 
-  // ✅ 로그인 유저 확인(쿠키 기반)
+  if (!circleId) {
+    return NextResponse.json({ ok: false, error: "Missing circle id" }, { status: 400 })
+  }
+
+  // ✅ 현재는 UUID 기반으로만 처리 (slug 쓰면 여기서 막힘)
+  if (!isUuid(circleId)) {
+    return NextResponse.json(
+      { ok: false, error: `Invalid circle id (expected uuid): ${circleId}` },
+      { status: 400 }
+    )
+  }
+
+  // ✅ 로그인 유저 확인
   const supabaseAuth = await createSupabaseAuthedServerClient()
   const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
-  const user = userData?.user
-  if (userErr || !user) {
+
+  if (userErr || !userData.user) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
   }
 
+  const user = userData.user
   const admin = createSupabaseAdminClient()
 
-  // ✅ 1) circleIdOrSlug -> circle uuid로 resolve
-  let circleId = circleIdOrSlug
-
-  if (!isUuid(circleIdOrSlug)) {
-    const { data: circleRow, error: circleErr } = await admin
-      .from("circles")
-      .select("id")
-      .eq("slug", circleIdOrSlug)
-      .maybeSingle()
-
-    if (circleErr) return NextResponse.json({ ok: false, error: circleErr.message }, { status: 500 })
-    if (!circleRow?.id) {
-      // slug가 DB에 없으면 404(혹은 200 ignored로 바꿔도 됨)
-      return NextResponse.json({ ok: false, error: "Circle not found" }, { status: 404 })
-    }
-    circleId = circleRow.id
-  }
-
-  // ✅ 2) 멤버십 체크 (circle_members: circle_id, user_id)
+  // ✅ 멤버십 체크 (circle_members: circle_id + user_id)
   const { data: member, error: memErr } = await admin
     .from("circle_members")
     .select("circle_id, user_id")
@@ -71,46 +67,46 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   if (memErr) return NextResponse.json({ ok: false, error: memErr.message }, { status: 500 })
   if (!member) return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 })
 
-  // ✅ 3) feed: circle_emails -> inbox_emails
-  // (컬럼명은 네 DB 기준으로 필요시 조정)
-  const { data: links, error: linkErr } = await admin
+  // ✅ feed: circle_emails + inbox_emails 조인
+  // FK가 circle_emails.email_id -> inbox_emails.id 로 잡혀있다는 전제
+  const { data: rows, error } = await admin
     .from("circle_emails")
-    .select("email_id, created_at")
+    .select(
+      `
+        id,
+        circle_id,
+        email_id,
+        shared_by,
+        created_at,
+        inbox_emails:inbox_emails (
+          id,
+          subject,
+          from_address,
+          received_at
+        )
+      `
+    )
     .eq("circle_id", circleId)
     .order("created_at", { ascending: false })
-    .limit(limit)
+    .limit(Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 50) : 20)
 
-  if (linkErr) return NextResponse.json({ ok: false, error: linkErr.message }, { status: 500 })
+  if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
 
-  const emailIds = (links ?? []).map((r) => r.email_id).filter(Boolean)
-  if (emailIds.length === 0) {
-    return NextResponse.json({ ok: true, items: [] }, { status: 200 })
-  }
-
-  const { data: emails, error: emailErr } = await admin
-    .from("inbox_emails")
-    .select("id, from_address, subject, received_at, body_text, body_html")
-    .in("id", emailIds)
-
-  if (emailErr) return NextResponse.json({ ok: false, error: emailErr.message }, { status: 500 })
-
-  const byId = new Map((emails ?? []).map((e) => [e.id, e]))
-
-  // 링크 순서 유지해서 반환
-  const items = (links ?? [])
-    .map((l) => {
-      const e = byId.get(l.email_id)
-      if (!e) return null
-      return {
-        circle_id: circleId,
-        email_id: e.id,
-        shared_at: l.created_at,
-        from_address: e.from_address,
-        subject: e.subject,
-        received_at: e.received_at,
-      }
-    })
-    .filter(Boolean)
+  const items = (rows ?? []).map((r: any) => ({
+    id: r.id,
+    circleId: r.circle_id,
+    emailId: r.email_id,
+    sharedBy: r.shared_by,
+    sharedAt: r.created_at,
+    email: r.inbox_emails
+      ? {
+          id: r.inbox_emails.id,
+          subject: r.inbox_emails.subject ?? "(no subject)",
+          fromAddress: r.inbox_emails.from_address ?? null,
+          receivedAt: r.inbox_emails.received_at ?? null,
+        }
+      : null,
+  }))
 
   return NextResponse.json({ ok: true, items }, { status: 200 })
 }

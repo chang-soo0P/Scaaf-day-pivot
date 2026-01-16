@@ -6,8 +6,7 @@ import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 export const runtime = "nodejs"
 
 async function createSupabaseAuthedServerClient() {
-  const cookieStore = await cookies() // ✅ Next15
-
+  const cookieStore = await cookies()
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -23,92 +22,85 @@ async function createSupabaseAuthedServerClient() {
   )
 }
 
-function slugify(input: string) {
-  return input
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48)
+function getLimit(req: NextRequest, fallback = 50) {
+  const n = Number(req.nextUrl.searchParams.get("limit") ?? fallback)
+  if (!Number.isFinite(n)) return fallback
+  return Math.max(1, Math.min(100, Math.floor(n)))
 }
 
 export async function GET(req: NextRequest) {
-  const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") ?? 50), 200)
+  const limit = getLimit(req, 50)
 
+  // 1) 로그인 유저 확인
   const supabaseAuth = await createSupabaseAuthedServerClient()
-  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
-  const user = userData?.user
-  if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+  const { data: u, error: userErr } = await supabaseAuth.auth.getUser()
+  if (userErr || !u.user) {
+    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+  }
 
+  const userId = u.user.id
   const admin = createSupabaseAdminClient()
 
-  // 1) 내 멤버십 circle_id들
-  const { data: memRows, error: memErr } = await admin
+  // 2) 내 circle membership 가져오기
+  const { data: memberships, error: memErr } = await admin
     .from("circle_members")
     .select("circle_id")
-    .eq("user_id", user.id)
+    .eq("user_id", userId)
     .limit(limit)
 
   if (memErr) return NextResponse.json({ ok: false, error: memErr.message }, { status: 500 })
 
-  const circleIds = (memRows ?? []).map((r: any) => r.circle_id).filter(Boolean)
-  if (circleIds.length === 0) return NextResponse.json({ ok: true, circles: [] }, { status: 200 })
+  const circleIds = (memberships ?? [])
+    .map((m: any) => m.circle_id)
+    .filter(Boolean)
 
-  // 2) circles 가져오기
+  if (circleIds.length === 0) {
+    return NextResponse.json({ ok: true, circles: [] }, { status: 200 })
+  }
+
+  // 3) circles 메타 (✅ description/slug select 금지)
   const { data: circles, error: cErr } = await admin
     .from("circles")
-    .select("id, slug, name, description, created_at")
+    .select("id, name, created_at")
     .in("id", circleIds)
     .order("created_at", { ascending: false })
 
   if (cErr) return NextResponse.json({ ok: false, error: cErr.message }, { status: 500 })
 
-  return NextResponse.json({ ok: true, circles: circles ?? [] }, { status: 200 })
-}
+  // 4) 멤버수/공유수 카운트
+  const [{ data: memberRows, error: mcErr }, { data: shareRows, error: scErr }] = await Promise.all([
+    admin
+      .from("circle_members")
+      .select("circle_id")
+      .in("circle_id", circleIds),
+    admin
+      .from("circle_emails")
+      .select("circle_id")
+      .in("circle_id", circleIds),
+  ])
 
-export async function POST(req: NextRequest) {
-  const supabaseAuth = await createSupabaseAuthedServerClient()
-  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
-  const user = userData?.user
-  if (userErr || !user) return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+  if (mcErr) return NextResponse.json({ ok: false, error: mcErr.message }, { status: 500 })
+  if (scErr) return NextResponse.json({ ok: false, error: scErr.message }, { status: 500 })
 
-  const body = await req.json().catch(() => ({}))
-  const name = String(body?.name ?? "").trim()
-  const description = body?.description != null ? String(body.description) : null
-  const slugInput = body?.slug != null ? String(body.slug) : ""
-
-  if (!name) return NextResponse.json({ ok: false, error: "Missing name" }, { status: 400 })
-
-  const admin = createSupabaseAdminClient()
-
-  // slug 자동 생성 + 중복이면 -2, -3…
-  let baseSlug = slugInput.trim() ? slugify(slugInput) : slugify(name)
-  if (!baseSlug) baseSlug = `circle-${Date.now()}`
-
-  let finalSlug = baseSlug
-  for (let i = 0; i < 10; i++) {
-    const { data: exist } = await admin.from("circles").select("id").eq("slug", finalSlug).maybeSingle()
-    if (!exist) break
-    finalSlug = `${baseSlug}-${i + 2}`
+  const memberCountMap = new Map<string, number>()
+  for (const r of memberRows ?? []) {
+    const k = (r as any).circle_id
+    memberCountMap.set(k, (memberCountMap.get(k) ?? 0) + 1)
   }
 
-  const { data: circle, error: insErr } = await admin
-    .from("circles")
-    .insert({ name, description, slug: finalSlug })
-    .select("id, slug, name, description, created_at")
-    .single()
-
-  if (insErr) return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
-
-  // 생성자를 멤버로 자동 등록
-  const { error: memErr } = await admin
-    .from("circle_members")
-    .insert({ circle_id: circle.id, user_id: user.id })
-
-  if (memErr) {
-    // circle은 생성됐는데 멤버 insert 실패 → 롤백은 MVP에선 생략하고 에러만 리턴
-    return NextResponse.json({ ok: false, error: memErr.message }, { status: 500 })
+  const sharedCountMap = new Map<string, number>()
+  for (const r of shareRows ?? []) {
+    const k = (r as any).circle_id
+    sharedCountMap.set(k, (sharedCountMap.get(k) ?? 0) + 1)
   }
 
-  return NextResponse.json({ ok: true, circle }, { status: 200 })
+  const out = (circles ?? []).map((c: any) => ({
+    id: c.id,
+    name: c.name ?? "Circle",
+    memberCount: memberCountMap.get(c.id) ?? 0,
+    sharedCount: sharedCountMap.get(c.id) ?? 0,
+    createdAt: c.created_at,
+  }))
+
+  return NextResponse.json({ ok: true, circles: out }, { status: 200 })
 }
