@@ -5,28 +5,25 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { emailDetailHref } from "@/lib/email-href"
 import { cn } from "@/lib/utils"
-import { MessageCircle, Megaphone, Grid3X3, LayoutList, Loader2 } from "lucide-react"
+import { MessageCircle, Megaphone, Loader2 } from "lucide-react"
 
-// --- API Types ---
-type FeedEmail = {
+// --- API Types (✅ 현재 /api/circles/feed 응답에 맞춤) ---
+type FeedItem = {
   id: string
-  from_address: string | null
+  circleId: string
+  emailId: string
+  sharedAt: string
+  sharedBy: string | null
   subject: string | null
-  received_at: string | null
-}
-
-type FeedItemRow = {
-  id: string
-  circle_id: string
-  circle_name: string | null
-  email_id: string
-  shared_by: string
-  created_at: string
-  email: FeedEmail | null
+  fromAddress: string | null
+  receivedAt: string | null
+  highlightCount?: number
+  commentCount?: number
+  latestActivity?: string | null
 }
 
 type ApiFeedResponse =
-  | { ok: true; items: FeedItemRow[]; nextCursor: string | null }
+  | { ok: true; feed: FeedItem[] }
   | { ok: false; error?: string }
 
 // --- Helpers ---
@@ -53,6 +50,7 @@ function formatTimeRelative(iso: string) {
   const diffMins = Math.floor(diffMs / 60000)
   const diffHours = Math.floor(diffMs / 3600000)
 
+  if (diffMins < 1) return `now`
   if (diffMins < 60) return `${diffMins}m ago`
   if (diffHours < 24) return `${diffHours}h ago`
   return date.toLocaleDateString()
@@ -130,48 +128,45 @@ export default function TopicsPage() {
   const [items, setItems] = useState<TopicFeedItem[]>([])
   const [error, setError] = useState<string | null>(null)
 
-  // cursor paging
+  // ✅ 현재 API는 cursor paging을 안 주므로, infinite scroll은 "다음 단계"로.
+  // 일단 UI를 살리기 위해 sentinel은 남겨두되 nextCursor는 항상 null로 둠.
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
-
   const sentinelRef = useRef<HTMLDivElement | null>(null)
 
-  const fetchPage = async (cursor: string | null, mode: "replace" | "append") => {
+  const fetchPage = async () => {
     const qs = new URLSearchParams()
     qs.set("limit", "20")
-    if (cursor) qs.set("cursor", cursor)
 
     const res = await fetch(`/api/circles/feed?${qs.toString()}`, {
       cache: "no-store",
       credentials: "include",
     })
+
     const data = await safeReadJson<ApiFeedResponse>(res)
+    if (!res.ok) throw new Error((data as any)?.error ?? `HTTP ${res.status}`)
     if (!data.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
 
-    const mapped: TopicFeedItem[] = (data.items ?? []).map((row) => {
-      const subject = row.email?.subject ?? "(no subject)"
-      const senderName = extractNameFromEmail(row.email?.from_address ?? "Unknown")
+    const mapped: TopicFeedItem[] = (data.feed ?? []).map((row) => {
+      const subject = row.subject ?? "(no subject)"
+      const senderName = extractNameFromEmail(row.fromAddress ?? "Unknown")
 
       return {
         id: row.id,
-        emailId: row.email_id,
-        circleId: row.circle_id,
-        circleName: row.circle_name ?? "Circle",
+        emailId: row.emailId,
+        circleId: row.circleId,
+        // ✅ circleName은 API에 없으니 일단 placeholder
+        // (원하면 circle_name을 API에서 조인해서 내려주거나, 여기서 별도 fetch로 보강 가능)
+        circleName: "Circle",
         topic: "Today in your circles",
         newsletterTitle: subject,
         senderName,
-        sharedAt: row.created_at,
+        sharedAt: row.sharedAt,
       }
     })
 
-    setNextCursor(data.nextCursor ?? null)
-
-    setItems((prev) => {
-      if (mode === "replace") return mapped
-      const seen = new Set(prev.map((x) => x.id))
-      const appended = mapped.filter((x) => !seen.has(x.id))
-      return [...prev, ...appended]
-    })
+    setItems(mapped)
+    setNextCursor(null) // ✅ 현재 API는 nextCursor 미지원
   }
 
   // initial load
@@ -181,7 +176,7 @@ export default function TopicsPage() {
       try {
         setLoading(true)
         setError(null)
-        await fetchPage(null, "replace")
+        await fetchPage()
         if (cancelled) return
         setLoading(false)
       } catch (e: any) {
@@ -196,31 +191,27 @@ export default function TopicsPage() {
     }
   }, [])
 
-  // infinite scroll observer
+  // infinite scroll observer (✅ 당장은 비활성; nextCursor가 없으니 동작 안 함)
   useEffect(() => {
     if (activeTab !== "feed") return
     if (!sentinelRef.current) return
+    if (!nextCursor) return // ✅ 항상 null
 
     const el = sentinelRef.current
-    const obs = new IntersectionObserver(
-      async (entries) => {
-        const first = entries[0]
-        if (!first?.isIntersecting) return
-        if (!nextCursor) return
-        if (loadingMore) return
+    const obs = new IntersectionObserver(async (entries) => {
+      const first = entries[0]
+      if (!first?.isIntersecting) return
+      if (loadingMore) return
 
-        try {
-          setLoadingMore(true)
-          await fetchPage(nextCursor, "append")
-        } catch (e) {
-          // 무한스크롤은 에러를 조용히 처리해도 됨 (원하면 setError로 노출)
-          console.error(e)
-        } finally {
-          setLoadingMore(false)
-        }
-      },
-      { root: null, rootMargin: "400px 0px", threshold: 0 }
-    )
+      try {
+        setLoadingMore(true)
+        // await fetchPage(nextCursor, "append") // nextCursor 지원 시 복구
+      } catch (e) {
+        console.error(e)
+      } finally {
+        setLoadingMore(false)
+      }
+    })
 
     obs.observe(el)
     return () => obs.disconnect()
@@ -265,9 +256,6 @@ export default function TopicsPage() {
             Ad Board
           </button>
         </div>
-
-        {/* (옵션) layout 토글 UI 필요하면 여기 달아도 됨 */}
-        {/* setLayout("list"|"grid") */}
       </div>
 
       <div className="flex-1 px-4 pb-24">
