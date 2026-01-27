@@ -1,3 +1,4 @@
+// /app/api/circles/feed/route.ts
 import { NextRequest, NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { createServerClient } from "@supabase/ssr"
@@ -6,7 +7,7 @@ import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 export const runtime = "nodejs"
 
 async function createSupabaseAuthedServerClient() {
-  const cookieStore = await cookies()
+  const cookieStore = await cookies() // ✅ Next15: Promise
 
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -26,18 +27,18 @@ async function createSupabaseAuthedServerClient() {
 export async function GET(req: NextRequest) {
   const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") ?? 20), 100)
 
-  // 1) 로그인 유저 확인
+  // ✅ 로그인 유저 확인
   const supabaseAuth = await createSupabaseAuthedServerClient()
   const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
+  const user = userData?.user
 
-  if (userErr || !userData.user) {
+  if (userErr || !user) {
     return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
   }
 
-  const user = userData.user
   const admin = createSupabaseAdminClient()
 
-  // 2) 내가 속한 circle 목록
+  // 1) 내가 속한 circle_id 목록
   const { data: memberships, error: memErr } = await admin
     .from("circle_members")
     .select("circle_id")
@@ -50,37 +51,50 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, feed: [] }, { status: 200 })
   }
 
-  // 3) 글로벌 피드: circle_emails + circles + inbox_emails join
-  const { data: rows, error } = await admin
+  // 2) circle_emails에서 최근 공유글
+  const { data: shares, error: shareErr } = await admin
     .from("circle_emails")
-    .select(
-      `
-      id,
-      circle_id,
-      email_id,
-      shared_by,
-      created_at,
-      circles:circle_id ( id, name ),
-      inbox_emails:email_id ( id, subject, from_address, received_at )
-    `
-    )
+    .select("id, circle_id, email_id, shared_by, created_at")
     .in("circle_id", circleIds)
     .order("created_at", { ascending: false })
     .limit(limit)
 
-  if (error) return NextResponse.json({ ok: false, error: error.message }, { status: 500 })
+  if (shareErr) return NextResponse.json({ ok: false, error: shareErr.message }, { status: 500 })
 
-  const feed = (rows ?? []).map((r: any) => ({
-    id: r.id,
-    circleId: r.circle_id,
-    circleName: r.circles?.name ?? null,
-    emailId: r.email_id,
-    sharedAt: r.created_at,
-    sharedBy: r.shared_by ?? null,
-    subject: r.inbox_emails?.subject ?? null,
-    fromAddress: r.inbox_emails?.from_address ?? null,
-    receivedAt: r.inbox_emails?.received_at ?? null,
-  }))
+  const emailIds = Array.from(new Set((shares ?? []).map((s: any) => s.email_id).filter(Boolean)))
+  if (emailIds.length === 0) {
+    return NextResponse.json({ ok: true, feed: [] }, { status: 200 })
+  }
+
+  // 3) inbox_emails 메타 붙이기
+  const { data: emails, error: emailErr } = await admin
+    .from("inbox_emails")
+    .select("id, subject, from_address, received_at")
+    .in("id", emailIds)
+
+  if (emailErr) return NextResponse.json({ ok: false, error: emailErr.message }, { status: 500 })
+
+  const emailById = new Map((emails ?? []).map((e: any) => [e.id, e]))
+
+  // (옵션) highlights count 붙이고 싶으면 여기서 email_highlights를 emailIds로 group 해서 맵 만들면 됨.
+  // 지금은 0으로 반환해도 Topics Feed 표시엔 충분.
+
+  const feed = (shares ?? []).map((s: any) => {
+    const e = emailById.get(s.email_id)
+    return {
+      id: s.id,
+      circleId: s.circle_id,
+      emailId: s.email_id,
+      sharedAt: s.created_at,
+      sharedBy: s.shared_by ?? null,
+      subject: e?.subject ?? null,
+      fromAddress: e?.from_address ?? null,
+      receivedAt: e?.received_at ?? null,
+      highlightCount: 0,
+      commentCount: 0,
+      latestActivity: null,
+    }
+  })
 
   return NextResponse.json({ ok: true, feed }, { status: 200 })
 }
