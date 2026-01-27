@@ -4,6 +4,7 @@ import { ArrowLeft, Share2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ShineBorder } from "@/components/ui/shine-border"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
+import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 import { notFound } from "next/navigation"
 
 export const runtime = "nodejs"
@@ -16,6 +17,14 @@ type DbEmail = {
   received_at: string | null
   body_text: string | null
   body_html: string | null
+}
+
+type CircleFeedItem = {
+  id: string // share id
+  circle_id: string
+  email_id: string
+  shared_by: string | null
+  created_at: string
 }
 
 function extractNameFromEmail(addr: string) {
@@ -58,62 +67,58 @@ function oneLinerFromEmail(e: DbEmail) {
 }
 
 function getTopicConfig(topicSlug: string) {
-  // ✅ MVP: subject/body 키워드 기반 매칭 (나중에 topics 테이블 붙이면 여기만 바꾸면 됨)
-  const map: Record<
-    string,
-    { name: string; period: string; keywords: string[]; thumbnail?: string }
-  > = {
-    ai: {
-      name: "AI",
-      period: "Recent",
-      keywords: [
-        "ai",
-        "openai",
-        "gpt",
-        "llm",
-        "agent",
-        "deepmind",
-        "gemini",
-        "anthropic",
-        "claude",
-        "nvidia",
-        "inference",
-        "fine-tuning",
-      ],
-      thumbnail: "/ai-neural-network-abstract.jpg",
-    },
-    investing: {
-      name: "Investing",
-      period: "Recent",
-      keywords: ["market", "stocks", "etf", "fed", "rate", "inflation", "earnings", "yield", "crypto"],
-      thumbnail: "/stock-market-chart.png",
-    },
-    "korea-stocks": {
-      name: "Korea Stocks",
-      period: "Recent",
-      keywords: ["kospi", "kosdaq", "samsung", "sk hynix", "won", "seoul", "korea", "krx"],
-      thumbnail: "/korean-won-currency.jpg",
-    },
-    startups: {
-      name: "Startups",
-      period: "Recent",
-      keywords: ["startup", "yc", "y combinator", "seed", "series a", "funding", "vc", "pitch"],
-      thumbnail: "/startup-funding-money.jpg",
-    },
-    design: {
-      name: "Design",
-      period: "Recent",
-      keywords: ["design", "figma", "ux", "ui", "dribbble", "accessibility", "wcag", "lottie"],
-      thumbnail: "/figma-design-tool.jpg",
-    },
-  }
+  const map: Record<string, { name: string; period: string; keywords: string[]; thumbnail?: string }> =
+    {
+      ai: {
+        name: "AI",
+        period: "Recent",
+        keywords: [
+          "ai",
+          "openai",
+          "gpt",
+          "llm",
+          "agent",
+          "deepmind",
+          "gemini",
+          "anthropic",
+          "claude",
+          "nvidia",
+          "inference",
+          "fine-tuning",
+        ],
+        thumbnail: "/ai-neural-network-abstract.jpg",
+      },
+      investing: {
+        name: "Investing",
+        period: "Recent",
+        keywords: ["market", "stocks", "etf", "fed", "rate", "inflation", "earnings", "yield", "crypto"],
+        thumbnail: "/stock-market-chart.png",
+      },
+      "korea-stocks": {
+        name: "Korea Stocks",
+        period: "Recent",
+        keywords: ["kospi", "kosdaq", "samsung", "sk hynix", "won", "seoul", "korea", "krx"],
+        thumbnail: "/korean-won-currency.jpg",
+      },
+      startups: {
+        name: "Startups",
+        period: "Recent",
+        keywords: ["startup", "yc", "y combinator", "seed", "series a", "funding", "vc", "pitch"],
+        thumbnail: "/startup-funding-money.jpg",
+      },
+      design: {
+        name: "Design",
+        period: "Recent",
+        keywords: ["design", "figma", "ux", "ui", "dribbble", "accessibility", "wcag", "lottie"],
+        thumbnail: "/figma-design-tool.jpg",
+      },
+    }
 
   return map[topicSlug] ?? null
 }
 
 function matchesTopic(email: DbEmail, keywords: string[]) {
-  const hay =
-    `${email.subject ?? ""} ${email.body_text ?? ""} ${email.body_html ?? ""}`.toLowerCase()
+  const hay = `${email.subject ?? ""} ${email.body_text ?? ""} ${email.body_html ?? ""}`.toLowerCase()
   return keywords.some((k) => hay.includes(k.toLowerCase()))
 }
 
@@ -121,7 +126,7 @@ function NewsletterCard({
   newsletter,
 }: {
   newsletter: {
-    id: string
+    id: string // email id
     name: string
     subject: string
     receivedTime: string
@@ -130,6 +135,7 @@ function NewsletterCard({
     thumbnail: string
   }
 }) {
+  // ✅ email detail로 이동
   const href = `/inbox/${newsletter.id}`
 
   return (
@@ -175,6 +181,84 @@ export default async function TopicDetailPage({
   } = await supabase.auth.getUser()
   if (!user) notFound()
 
+  /**
+   * A) Circles Feed (공유된 이메일)
+   * - Server Component에서 API 호출 대신 DB 직접 조회(쿠키/credentials 이슈 방지)
+   * - admin client로 memberships/shares/email 메타를 한번에 모음
+   */
+  const admin = createSupabaseAdminClient()
+
+  const { data: memberships, error: memErr } = await admin
+    .from("circle_members")
+    .select("circle_id")
+    .eq("user_id", user.id)
+
+  if (memErr) {
+    console.error("[topics/[topicSlug]] circle_members error:", memErr)
+  }
+
+  const circleIds = (memberships ?? []).map((m: any) => m.circle_id).filter(Boolean)
+
+  let circleNewsletters: Array<{
+    id: string
+    name: string
+    subject: string
+    receivedTime: string
+    oneLiner: string
+    topic: string
+    thumbnail: string
+  }> = []
+
+  if (circleIds.length) {
+    const { data: shares, error: shareErr } = await admin
+      .from("circle_emails")
+      .select("id, circle_id, email_id, shared_by, created_at")
+      .in("circle_id", circleIds)
+      .order("created_at", { ascending: false })
+      .limit(50)
+
+    if (shareErr) {
+      console.error("[topics/[topicSlug]] circle_emails error:", shareErr)
+    } else {
+      const emailIds = Array.from(new Set((shares ?? []).map((s: any) => s.email_id).filter(Boolean)))
+
+      if (emailIds.length) {
+        const { data: emails, error: emailErr } = await admin
+          .from("inbox_emails")
+          .select("id,from_address,subject,received_at,body_text,body_html")
+          .in("id", emailIds)
+
+        if (emailErr) {
+          console.error("[topics/[topicSlug]] inbox_emails(in circle feed) error:", emailErr)
+        } else {
+          const byId = new Map((emails ?? []).map((e: any) => [e.id, e as DbEmail]))
+
+          const merged = (shares ?? [])
+            .map((s: CircleFeedItem) => byId.get(s.email_id))
+            .filter(Boolean) as DbEmail[]
+
+          const filteredCircle = merged.filter((e) => matchesTopic(e, cfg.keywords)).slice(0, 20)
+
+          circleNewsletters = filteredCircle.map((e) => {
+            const from = e.from_address ?? "Unknown"
+            return {
+              id: e.id, // ✅ email id
+              name: extractNameFromEmail(from),
+              subject: (e.subject ?? "(no subject)").toString(),
+              receivedTime: formatTime(e.received_at) || "—",
+              oneLiner: oneLinerFromEmail(e),
+              topic: cfg.name,
+              thumbnail: cfg.thumbnail ?? "/placeholder.svg",
+            }
+          })
+        }
+      }
+    }
+  }
+
+  /**
+   * B) From your inbox (기존 로직 유지)
+   */
   const { data: emails, error } = await supabase
     .from("inbox_emails")
     .select("id,from_address,subject,received_at,body_text,body_html")
@@ -187,14 +271,12 @@ export default async function TopicDetailPage({
     notFound()
   }
 
-  const filtered = (emails ?? []).filter((e: any) =>
-    matchesTopic(e as DbEmail, cfg.keywords)
-  ) as DbEmail[]
+  const filteredInbox = (emails ?? []).filter((e: any) => matchesTopic(e as DbEmail, cfg.keywords)) as DbEmail[]
 
-  const newsletters = filtered.slice(0, 30).map((e) => {
+  const inboxNewsletters = filteredInbox.slice(0, 30).map((e) => {
     const from = e.from_address ?? "Unknown"
     return {
-      id: e.id, // ✅ UUID 그대로
+      id: e.id,
       name: extractNameFromEmail(from),
       subject: (e.subject ?? "(no subject)").toString(),
       receivedTime: formatTime(e.received_at) || "—",
@@ -235,14 +317,34 @@ export default async function TopicDetailPage({
         </div>
       </ShineBorder>
 
+      {/* ✅ NEW: From circles */}
       <div className="mb-6">
         <h2 className="mb-4 text-sm font-medium uppercase tracking-wide text-muted-foreground">
-          From your inbox ({newsletters.length})
+          From circles ({circleNewsletters.length})
         </h2>
 
-        {newsletters.length ? (
+        {circleNewsletters.length ? (
           <div className="flex flex-col gap-3">
-            {newsletters.map((nl) => (
+            {circleNewsletters.map((nl) => (
+              <NewsletterCard key={nl.id} newsletter={nl} />
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-2xl bg-card p-5 ring-1 ring-border text-sm text-muted-foreground">
+            No shared posts matched this topic yet.
+          </div>
+        )}
+      </div>
+
+      {/* 기존: From your inbox */}
+      <div className="mb-6">
+        <h2 className="mb-4 text-sm font-medium uppercase tracking-wide text-muted-foreground">
+          From your inbox ({inboxNewsletters.length})
+        </h2>
+
+        {inboxNewsletters.length ? (
+          <div className="flex flex-col gap-3">
+            {inboxNewsletters.map((nl) => (
               <NewsletterCard key={nl.id} newsletter={nl} />
             ))}
           </div>
