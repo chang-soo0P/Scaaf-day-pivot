@@ -1,72 +1,33 @@
-// app/circles/[circleId]/page.tsx
 import Link from "next/link"
 import { notFound } from "next/navigation"
-import { cookies, headers } from "next/headers"
-import { ArrowLeft, Users, Hash } from "lucide-react"
-import { Button } from "@/components/ui/button"
-import { ShineBorder } from "@/components/ui/shine-border"
+import { ArrowLeft } from "lucide-react"
+import { createSupabaseServerClient } from "@/lib/supabase/server"
+import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 import CircleFeedClient from "./_components/CircleFeedClient"
-import type { CircleFeedApiResponse, CircleFeedItem } from "@/types/circle-feed"
+import type { CircleFeedItem } from "@/types/circle-feed"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-type CircleApiResponse =
-  | {
-      ok: true
-      circle: { id: string; name?: string | null; description?: string | null; [key: string]: any }
-      counts: { members: number; shares: number }
-    }
-  | { ok: false; error?: string }
-
-async function getBaseUrl() {
-  const envUrl = process.env.NEXT_PUBLIC_APP_URL?.trim()
-  if (envUrl) return envUrl.replace(/\/+$/, "")
-  const h = await headers()
-  const proto = h.get("x-forwarded-proto") ?? "http"
-  const host = h.get("x-forwarded-host") ?? h.get("host")
-  if (!host) return "http://localhost:3000"
-  return `${proto}://${host}`
+type DbCircle = { id: string; name: string | null }
+type DbShare = {
+  id: string
+  circle_id: string
+  email_id: string
+  shared_by: string | null
+  created_at: string
 }
-
-async function fetchJsonFromApi<T>(path: string): Promise<T> {
-  const baseUrl = await getBaseUrl()
-  const url = `${baseUrl}${path.startsWith("/") ? path : `/${path}`}`
-
-  const cookieStore = await cookies()
-  const cookieHeader = cookieStore
-    .getAll()
-    .map((c) => `${c.name}=${c.value}`)
-    .join("; ")
-
-  const res = await fetch(url, {
-    cache: "no-store",
-    headers: { ...(cookieHeader ? { cookie: cookieHeader } : {}) },
-  })
-
-  const text = await res.text()
-  let data: any = null
-  try {
-    data = JSON.parse(text)
-  } catch {}
-
-  if (!res.ok) {
-    const msg = data?.error || text || `HTTP ${res.status}`
-    throw new Error(msg)
-  }
-  return (data ?? {}) as T
+type DbEmail = {
+  id: string
+  subject: string | null
+  from_address: string | null
+  received_at: string | null
 }
-
-function CircleStat({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
-  return (
-    <div className="flex items-center gap-2 rounded-xl bg-secondary px-3 py-2">
-      <span className="text-muted-foreground">{icon}</span>
-      <div className="flex flex-col leading-tight">
-        <span className="text-[11px] text-muted-foreground">{label}</span>
-        <span className="text-sm font-semibold text-foreground">{value}</span>
-      </div>
-    </div>
-  )
+type DbUser = {
+  id: string
+  username: string | null
+  display_name: string | null
+  email_address: string | null
 }
 
 export default async function CircleDetailPage({
@@ -75,32 +36,129 @@ export default async function CircleDetailPage({
   params: Promise<{ circleId: string }>
 }) {
   const { circleId } = await params
-  if (!circleId) notFound()
 
-  let circleRes: CircleApiResponse
-  try {
-    circleRes = await fetchJsonFromApi<CircleApiResponse>(`/api/circles/${circleId}`)
-  } catch {
+  // 1) 로그인 확인
+  const supabase = await createSupabaseServerClient()
+  const {
+    data: { user },
+  } = await supabase.auth.getUser()
+  if (!user) notFound()
+
+  const admin = createSupabaseAdminClient()
+
+  // 2) 멤버십 확인
+  const { data: mem, error: memErr } = await admin
+    .from("circle_members")
+    .select("id")
+    .eq("circle_id", circleId)
+    .eq("user_id", user.id)
+    .maybeSingle()
+
+  if (memErr) {
+    console.error("[circles/[circleId]] membership error:", memErr)
     notFound()
   }
-  if (!circleRes.ok) notFound()
+  if (!mem) notFound()
 
-  let feedRes: CircleFeedApiResponse
-  try {
-    feedRes = await fetchJsonFromApi<CircleFeedApiResponse>(`/api/circles/${circleId}/feed?limit=20`)
-  } catch {
-    feedRes = { ok: true, feed: [], nextCursor: null }
+  // 3) circle 정보
+  const { data: circle, error: circleErr } = await admin
+    .from("circles")
+    .select("id, name")
+    .eq("id", circleId)
+    .maybeSingle<DbCircle>()
+
+  if (circleErr) {
+    console.error("[circles/[circleId]] circle error:", circleErr)
+    notFound()
+  }
+  if (!circle) notFound()
+
+  // 4) 최신 공유글 20개
+  const { data: sharesRaw, error: shareErr } = await admin
+    .from("circle_emails")
+    .select("id, circle_id, email_id, shared_by, created_at")
+    .eq("circle_id", circleId)
+    .order("created_at", { ascending: false })
+    .limit(20)
+
+  if (shareErr) {
+    console.error("[circles/[circleId]] share error:", shareErr)
+    notFound()
   }
 
-  const initialFeed: CircleFeedItem[] = feedRes.ok ? (feedRes.feed ?? []) : []
-  const initialNextCursor = feedRes.ok ? (feedRes.nextCursor ?? null) : null
+  const shares = (sharesRaw ?? []) as DbShare[]
+  const nextCursor = shares.length === 20 ? shares[shares.length - 1]?.created_at ?? null : null
 
-  const circle = circleRes.circle
-  const counts = circleRes.counts
+  // 5) 이메일 메타
+  const emailIds = Array.from(new Set(shares.map((s) => s.email_id).filter(Boolean)))
+  let emailById = new Map<string, DbEmail>()
+  if (emailIds.length > 0) {
+    const { data: emailsRaw, error: emailErr } = await admin
+      .from("inbox_emails")
+      .select("id, subject, from_address, received_at")
+      .in("id", emailIds)
+
+    if (emailErr) {
+      console.error("[circles/[circleId]] email meta error:", emailErr)
+      notFound()
+    }
+
+    const emails = (emailsRaw ?? []) as DbEmail[]
+    emailById = new Map(emails.map((e) => [e.id, e]))
+  }
+
+  // 6) 공유자 프로필: public.users에서 name만 가져오기 (avatarUrl 없음)
+  const userIds = Array.from(new Set(shares.map((s) => s.shared_by).filter(Boolean))) as string[]
+  let userById = new Map<string, DbUser>()
+  if (userIds.length > 0) {
+    const { data: usersRaw, error: usersErr } = await admin
+      .from("users")
+      .select("id, username, display_name, email_address")
+      .in("id", userIds)
+
+    if (usersErr) {
+      console.error("[circles/[circleId]] users error:", usersErr)
+      // users 조회 실패해도 feed는 렌더 가능
+    } else {
+      const users = (usersRaw ?? []) as DbUser[]
+      userById = new Map(users.map((u) => [u.id, u]))
+    }
+  }
+
+  // 7) ✅ CircleFeedItem은 "공통 타입" 그대로 사용
+  //    sharedByProfile은 optional이 아니라 "필수 key"로 넣고, 값은 null 가능하게!
+  const initialFeed: CircleFeedItem[] = shares.map((s) => {
+    const e = emailById.get(s.email_id)
+    const u = s.shared_by ? userById.get(s.shared_by) : null
+
+    const name =
+      (u?.display_name && u.display_name.trim()) ||
+      (u?.username && u.username.trim()) ||
+      "Member"
+
+    return {
+      id: s.id,
+      circleId: s.circle_id,
+      emailId: s.email_id,
+      sharedAt: s.created_at,
+      sharedBy: s.shared_by ?? null,
+
+      subject: e?.subject ?? null,
+      fromAddress: e?.from_address ?? null,
+      receivedAt: e?.received_at ?? null,
+
+      highlightCount: 0,
+      commentCount: 0,
+      latestActivity: null,
+
+      // ✅ 중요: 반드시 넣기 (undefined 금지)
+      sharedByProfile: s.shared_by ? { id: s.shared_by, name, avatarUrl: null } : null,
+    }
+  })
 
   return (
-    <div className="mx-auto max-w-2xl px-4 py-6">
-      <div className="mb-6 flex items-center gap-3">
+    <div className="mx-auto max-w-lg px-4 py-6">
+      <div className="mb-5 flex items-center gap-3">
         <Link
           href="/circles"
           className="flex h-10 w-10 items-center justify-center rounded-full bg-secondary transition-colors hover:bg-secondary/80"
@@ -109,40 +167,14 @@ export default async function CircleDetailPage({
         </Link>
 
         <div className="min-w-0">
-          <h1 className="truncate text-2xl font-semibold text-foreground">{circle?.name ?? "Circle"}</h1>
-          <p className="text-sm text-muted-foreground">Circle detail</p>
-        </div>
-
-        <div className="ml-auto hidden sm:block">
-          <Button variant="secondary" className="rounded-xl">
-            Settings
-          </Button>
+          <h1 className="text-xl font-semibold text-foreground truncate">
+            {circle.name ?? "Circle"}
+          </h1>
+          <p className="text-xs text-muted-foreground">Circle detail</p>
         </div>
       </div>
 
-      <ShineBorder
-        className="mb-6 shadow-sm ring-1 ring-border"
-        borderRadius={16}
-        color={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
-        duration={10}
-      >
-        <div className="p-5">
-          <div className="flex flex-wrap gap-2">
-            <CircleStat icon={<Users className="h-4 w-4" />} label="Members" value={counts.members} />
-            <CircleStat icon={<Hash className="h-4 w-4" />} label="Shares" value={counts.shares} />
-          </div>
-
-          {circle?.description ? (
-            <p className="mt-3 text-sm text-muted-foreground">{circle.description}</p>
-          ) : (
-            <p className="mt-3 text-sm text-muted-foreground">
-              Share newsletters to this circle and discuss together.
-            </p>
-          )}
-        </div>
-      </ShineBorder>
-
-      <CircleFeedClient circleId={circleId} initialFeed={initialFeed} initialNextCursor={initialNextCursor} />
+      <CircleFeedClient circleId={circleId} initialFeed={initialFeed} initialNextCursor={nextCursor} />
     </div>
   )
 }
