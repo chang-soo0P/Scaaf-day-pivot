@@ -2,9 +2,10 @@
 import Link from "next/link"
 import { notFound } from "next/navigation"
 import { cookies, headers } from "next/headers"
-import { ArrowLeft, Users, Hash, Mail } from "lucide-react"
+import { ArrowLeft, Users, Hash } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ShineBorder } from "@/components/ui/shine-border"
+import CircleFeedClient from "./_components/CircleFeedClient"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -15,8 +16,6 @@ type CircleApiResponse =
       circle: {
         id: string
         name?: string | null
-        created_at?: string | null
-        owner_id?: string | null
         description?: string | null
         [key: string]: any
       }
@@ -27,25 +26,19 @@ type CircleApiResponse =
 type FeedItem = {
   id: string
   circleId: string
-  circleName?: string | null
   emailId: string
   sharedAt: string
   sharedBy: string | null
   subject: string | null
   fromAddress: string | null
   receivedAt: string | null
-  highlightCount?: number
-  commentCount?: number
-  latestActivity?: string | null
-  circleMemberCount?: number | null
-  circleShareCount?: number | null
 }
 
-type FeedApiResponse =
-  | { ok: true; items?: any[]; feed?: FeedItem[]; nextCursor?: string | null }
+type CircleFeedApiResponse =
+  | { ok: true; feed: FeedItem[]; nextCursor: string | null }
   | { ok: false; error?: string }
 
-// ✅ 절대 URL 생성 (env 우선, 없으면 요청 헤더 기반) - Next15: headers()는 Promise
+// ✅ baseUrl (env 우선, 없으면 요청 헤더 기반)
 async function getBaseUrl() {
   const envUrl = process.env.NEXT_PUBLIC_APP_URL?.trim()
   if (envUrl) return envUrl.replace(/\/+$/, "")
@@ -57,7 +50,7 @@ async function getBaseUrl() {
   return `${proto}://${host}`
 }
 
-// ✅ 현재 요청 쿠키를 API fetch에 그대로 전달 (Next15: cookies()도 Promise)
+// ✅ 서버에서 API 호출 시 쿠키 포워딩
 async function fetchJsonFromApi<T>(path: string): Promise<T> {
   const baseUrl = await getBaseUrl()
   const url = `${baseUrl}${path.startsWith("/") ? path : `/${path}`}`
@@ -79,9 +72,7 @@ async function fetchJsonFromApi<T>(path: string): Promise<T> {
   let data: any = null
   try {
     data = JSON.parse(text)
-  } catch {
-    // ignore
-  }
+  } catch {}
 
   if (!res.ok) {
     const msg = data?.error || text || `HTTP ${res.status}`
@@ -89,20 +80,6 @@ async function fetchJsonFromApi<T>(path: string): Promise<T> {
   }
 
   return (data ?? {}) as T
-}
-
-function fmtDate(iso: string | null) {
-  if (!iso) return "—"
-  const d = new Date(iso)
-  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" })
-}
-
-function extractNameFromEmail(addr: string | null) {
-  if (!addr) return "Unknown"
-  const emailMatch = addr.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
-  const email = emailMatch?.[0] ?? addr
-  const name = email.split("@")[0]
-  return name || email
 }
 
 function CircleStat({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
@@ -117,43 +94,6 @@ function CircleStat({ icon, label, value }: { icon: React.ReactNode; label: stri
   )
 }
 
-function ShareRow({
-  subject,
-  fromAddress,
-  sharedAt,
-  emailId,
-}: {
-  subject: string
-  fromAddress: string | null
-  sharedAt: string
-  emailId: string
-}) {
-  return (
-    <Link
-      href={`/inbox/${emailId}`}
-      prefetch={false}
-      className="block rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md"
-    >
-      <div className="flex items-start gap-3">
-        <div className="mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-secondary">
-          <Mail className="h-4 w-4 text-secondary-foreground" />
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground truncate">from {extractNameFromEmail(fromAddress)}</p>
-            <p className="text-xs text-muted-foreground">{fmtDate(sharedAt)}</p>
-          </div>
-
-          <h3 className="mt-1 text-sm font-semibold leading-snug text-foreground line-clamp-2">
-            {subject}
-          </h3>
-        </div>
-      </div>
-    </Link>
-  )
-}
-
 export default async function CircleDetailPage({
   params,
 }: {
@@ -162,28 +102,27 @@ export default async function CircleDetailPage({
   const { circleId } = await params
   if (!circleId) notFound()
 
-  // ✅ (1) circle 메타 + 권한(멤버십) 체크는 API가 수행
+  // 1) circle 메타 + 멤버십 체크(권한)은 API가 처리
   let circleRes: CircleApiResponse
   try {
     circleRes = await fetchJsonFromApi<CircleApiResponse>(`/api/circles/${circleId}`)
   } catch {
     notFound()
   }
-  if (!circleRes || !("ok" in circleRes) || !circleRes.ok) notFound()
+  if (!circleRes.ok) notFound()
+
+  // 2) circle 전용 feed 초기 1페이지 SSR
+  let feedRes: CircleFeedApiResponse
+  try {
+    feedRes = await fetchJsonFromApi<CircleFeedApiResponse>(`/api/circles/${circleId}/feed?limit=20`)
+  } catch {
+    feedRes = { ok: true, feed: [], nextCursor: null }
+  }
+  const initialFeed = feedRes.ok ? (feedRes.feed ?? []) : []
+  const initialNextCursor = feedRes.ok ? (feedRes.nextCursor ?? null) : null
 
   const circle = circleRes.circle
   const counts = circleRes.counts
-
-  // ✅ (2) circle feed: /api/circles/feed에서 가져온 뒤 서버에서 circleId로 필터링 (MVP)
-  let feedRes: FeedApiResponse
-  try {
-    feedRes = await fetchJsonFromApi<FeedApiResponse>(`/api/circles/feed?limit=50`)
-  } catch {
-    feedRes = { ok: true, feed: [], items: [], nextCursor: null }
-  }
-
-  const flatFeed: FeedItem[] = Array.isArray((feedRes as any).feed) ? (feedRes as any).feed : []
-  const filtered = flatFeed.filter((x) => x.circleId === circleId)
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-6">
@@ -225,34 +164,23 @@ export default async function CircleDetailPage({
         </div>
       </ShineBorder>
 
-      {/* Feed */}
+      {/* Feed header */}
       <div className="mb-3 flex items-end justify-between">
         <div>
           <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">Shared emails</h2>
-          <p className="text-xs text-muted-foreground mt-1">Showing latest shares (MVP).</p>
+          <p className="text-xs text-muted-foreground mt-1">Infinite scroll enabled.</p>
         </div>
         <Button variant="secondary" className="rounded-xl">
           Invite
         </Button>
       </div>
 
-      {filtered.length ? (
-        <div className="space-y-3">
-          {filtered.map((it) => (
-            <ShareRow
-              key={it.id}
-              emailId={it.emailId}
-              subject={it.subject ?? "(no subject)"}
-              fromAddress={it.fromAddress}
-              sharedAt={it.sharedAt}
-            />
-          ))}
-        </div>
-      ) : (
-        <div className="rounded-2xl bg-card p-5 ring-1 ring-border text-sm text-muted-foreground">
-          No shares yet. Go to an email and “Share to circle”.
-        </div>
-      )}
+      {/* ✅ Client infinite feed */}
+      <CircleFeedClient
+        circleId={circleId}
+        initialFeed={initialFeed}
+        initialNextCursor={initialNextCursor}
+      />
     </div>
   )
 }
