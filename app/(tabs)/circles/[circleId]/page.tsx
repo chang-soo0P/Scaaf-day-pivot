@@ -1,6 +1,7 @@
 // app/circles/[circleId]/page.tsx
 import Link from "next/link"
 import { notFound } from "next/navigation"
+import { cookies, headers } from "next/headers"
 import { ArrowLeft, Users, Hash, Mail } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ShineBorder } from "@/components/ui/shine-border"
@@ -36,14 +37,44 @@ type FeedItem = {
   highlightCount?: number
   commentCount?: number
   latestActivity?: string | null
+  circleMemberCount?: number | null
+  circleShareCount?: number | null
 }
 
 type FeedApiResponse =
   | { ok: true; items?: any[]; feed?: FeedItem[]; nextCursor?: string | null }
   | { ok: false; error?: string }
 
-async function safeFetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url, { cache: "no-store", credentials: "include" as any })
+// ✅ 절대 URL 생성 (env 우선, 없으면 요청 헤더 기반) - Next15: headers()는 Promise
+async function getBaseUrl() {
+  const envUrl = process.env.NEXT_PUBLIC_APP_URL?.trim()
+  if (envUrl) return envUrl.replace(/\/+$/, "")
+
+  const h = await headers()
+  const proto = h.get("x-forwarded-proto") ?? "http"
+  const host = h.get("x-forwarded-host") ?? h.get("host")
+  if (!host) return "http://localhost:3000"
+  return `${proto}://${host}`
+}
+
+// ✅ 현재 요청 쿠키를 API fetch에 그대로 전달 (Next15: cookies()도 Promise)
+async function fetchJsonFromApi<T>(path: string): Promise<T> {
+  const baseUrl = await getBaseUrl()
+  const url = `${baseUrl}${path.startsWith("/") ? path : `/${path}`}`
+
+  const cookieStore = await cookies()
+  const cookieHeader = cookieStore
+    .getAll()
+    .map((c) => `${c.name}=${c.value}`)
+    .join("; ")
+
+  const res = await fetch(url, {
+    cache: "no-store",
+    headers: {
+      ...(cookieHeader ? { cookie: cookieHeader } : {}),
+    },
+  })
+
   const text = await res.text()
   let data: any = null
   try {
@@ -51,10 +82,12 @@ async function safeFetchJson<T>(url: string): Promise<T> {
   } catch {
     // ignore
   }
+
   if (!res.ok) {
     const msg = data?.error || text || `HTTP ${res.status}`
     throw new Error(msg)
   }
+
   return (data ?? {}) as T
 }
 
@@ -108,9 +141,7 @@ function ShareRow({
 
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-3">
-            <p className="text-xs text-muted-foreground truncate">
-              from {extractNameFromEmail(fromAddress)}
-            </p>
+            <p className="text-xs text-muted-foreground truncate">from {extractNameFromEmail(fromAddress)}</p>
             <p className="text-xs text-muted-foreground">{fmtDate(sharedAt)}</p>
           </div>
 
@@ -134,8 +165,8 @@ export default async function CircleDetailPage({
   // ✅ (1) circle 메타 + 권한(멤버십) 체크는 API가 수행
   let circleRes: CircleApiResponse
   try {
-    circleRes = await safeFetchJson<CircleApiResponse>(`/api/circles/${circleId}`)
-  } catch (e) {
+    circleRes = await fetchJsonFromApi<CircleApiResponse>(`/api/circles/${circleId}`)
+  } catch {
     notFound()
   }
   if (!circleRes || !("ok" in circleRes) || !circleRes.ok) notFound()
@@ -143,12 +174,11 @@ export default async function CircleDetailPage({
   const circle = circleRes.circle
   const counts = circleRes.counts
 
-  // ✅ (2) circle feed: 기존 /api/circles/feed에서 circleId만 필터링
-  //     (API가 아직 circleId 필터를 지원하지 않아도, 최소로 동작하게 서버에서 필터링)
+  // ✅ (2) circle feed: /api/circles/feed에서 가져온 뒤 서버에서 circleId로 필터링 (MVP)
   let feedRes: FeedApiResponse
   try {
-    feedRes = await safeFetchJson<FeedApiResponse>(`/api/circles/feed?limit=50`)
-  } catch (e) {
+    feedRes = await fetchJsonFromApi<FeedApiResponse>(`/api/circles/feed?limit=50`)
+  } catch {
     feedRes = { ok: true, feed: [], items: [], nextCursor: null }
   }
 
@@ -199,9 +229,7 @@ export default async function CircleDetailPage({
       <div className="mb-3 flex items-end justify-between">
         <div>
           <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">Shared emails</h2>
-          <p className="text-xs text-muted-foreground mt-1">
-            Showing latest shares (loaded). Infinite scroll will be enabled when API supports circle cursor.
-          </p>
+          <p className="text-xs text-muted-foreground mt-1">Showing latest shares (MVP).</p>
         </div>
         <Button variant="secondary" className="rounded-xl">
           Invite
