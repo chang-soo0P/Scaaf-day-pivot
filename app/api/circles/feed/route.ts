@@ -23,14 +23,54 @@ async function createSupabaseAuthedServerClient() {
   )
 }
 
+type DbShare = {
+  id: string
+  circle_id: string
+  email_id: string
+  shared_by: string | null
+  created_at: string
+}
+
+type DbEmail = {
+  id: string
+  subject: string | null
+  from_address: string | null
+  received_at: string | null
+}
+
+type DbCircle = {
+  id: string
+  name: string | null
+}
+
+type DbUser = {
+  id: string
+  username: string | null
+  display_name: string | null
+  email_address: string | null
+}
+
+async function countByCircleId(admin: ReturnType<typeof createSupabaseAdminClient>, table: string, circleId: string) {
+  // PostgREST count exact (HEAD)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { count, error } = await (admin as any)
+    .from(table)
+    .select("*", { count: "exact", head: true })
+    .eq("circle_id", circleId)
+
+  if (error) return null
+  return typeof count === "number" ? count : null
+}
+
 /**
- * Cursor pagination:
- * - cursor = ISO timestamp of last item's sharedAt
- * - fetch created_at < cursor
+ * GET /api/circles/feed?limit=20&cursor=ISO
+ * cursor: 마지막 아이템의 sharedAt(created_at) ISO를 넘기면 created_at < cursor 로 페이징
  */
 export async function GET(req: NextRequest) {
   const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") ?? 20), 50)
   const cursor = req.nextUrl.searchParams.get("cursor") // ISO string
+
+  // ✅ 로그인 유저 확인
   const supabaseAuth = await createSupabaseAuthedServerClient()
   const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
   const user = userData?.user
@@ -41,7 +81,7 @@ export async function GET(req: NextRequest) {
 
   const admin = createSupabaseAdminClient()
 
-  // 1) my circle ids
+  // 1) 내가 속한 circle_id 목록
   const { data: memberships, error: memErr } = await admin
     .from("circle_members")
     .select("circle_id")
@@ -54,7 +94,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: true, feed: [], nextCursor: null }, { status: 200 })
   }
 
-  // 2) circle_emails (shared items)
+  // 2) circle_emails에서 최근 공유글
   let shareQuery = admin
     .from("circle_emails")
     .select("id, circle_id, email_id, shared_by, created_at")
@@ -67,14 +107,7 @@ export async function GET(req: NextRequest) {
   const { data: sharesRaw, error: shareErr } = await shareQuery
   if (shareErr) return NextResponse.json({ ok: false, error: shareErr.message }, { status: 500 })
 
-  const shares = (sharesRaw ?? []) as Array<{
-    id: string
-    circle_id: string
-    email_id: string
-    shared_by: string | null
-    created_at: string
-  }>
-
+  const shares = (sharesRaw ?? []) as DbShare[]
   if (shares.length === 0) {
     return NextResponse.json({ ok: true, feed: [], nextCursor: null }, { status: 200 })
   }
@@ -85,7 +118,7 @@ export async function GET(req: NextRequest) {
   const circleIdSet = Array.from(new Set(shares.map((s) => s.circle_id).filter(Boolean)))
   const userIds = Array.from(new Set(shares.map((s) => s.shared_by).filter(Boolean))) as string[]
 
-  // 3) inbox_emails meta
+  // 3) inbox_emails 메타
   const { data: emailsRaw, error: emailErr } = await admin
     .from("inbox_emails")
     .select("id, subject, from_address, received_at")
@@ -93,15 +126,10 @@ export async function GET(req: NextRequest) {
 
   if (emailErr) return NextResponse.json({ ok: false, error: emailErr.message }, { status: 500 })
 
-  const emails = (emailsRaw ?? []) as Array<{
-    id: string
-    subject: string | null
-    from_address: string | null
-    received_at: string | null
-  }>
+  const emails = (emailsRaw ?? []) as DbEmail[]
   const emailById = new Map(emails.map((e) => [e.id, e]))
 
-  // 4) circles meta (name)
+  // 4) circles 메타 (name)
   const { data: circlesRaw, error: circleErr } = await admin
     .from("circles")
     .select("id, name")
@@ -109,28 +137,44 @@ export async function GET(req: NextRequest) {
 
   if (circleErr) return NextResponse.json({ ok: false, error: circleErr.message }, { status: 500 })
 
-  const circles = (circlesRaw ?? []) as Array<{ id: string; name: string | null }>
+  const circles = (circlesRaw ?? []) as DbCircle[]
   const circleById = new Map(circles.map((c) => [c.id, c]))
 
-  // 5) sharedBy profile (name/avatar)
-  // ⚠️ 너희 프로젝트 테이블명이 profiles 아닐 수도 있음.
-  // 보통은 profiles(id, name, avatar_url) 형태.
-  const { data: profilesRaw, error: profErr } = await admin
-    .from("profiles")
-    .select("id, name, avatar_url")
-    .in("id", userIds)
+  // 5) ✅ sharedByProfile: public.users에서 가져오기 (profiles 없음)
+  // avatar_url 컬럼이 없으므로 avatarUrl은 null로 내려줌
+  let users: DbUser[] = []
+  if (userIds.length > 0) {
+    const { data: usersRaw, error: usersErr } = await admin
+      .from("users")
+      .select("id, username, display_name, email_address")
+      .in("id", userIds)
 
-  // profiles 테이블이 없으면: 에러를 무시하고 null로 내려줌 (피드 표시가 죽지 않게)
-  const profiles =
-    profErr || !profilesRaw
-      ? []
-      : ((profilesRaw ?? []) as Array<{ id: string; name: string | null; avatar_url: string | null }>)
-  const profileById = new Map(profiles.map((p) => [p.id, p]))
+    if (!usersErr && usersRaw) users = usersRaw as DbUser[]
+  }
+  const userById = new Map(users.map((u) => [u.id, u]))
+
+  // 6) ✅ circleMemberCount / circleShareCount (현재 페이지에 등장한 circle만 계산)
+  const countPairs = await Promise.all(
+    circleIdSet.map(async (cid) => {
+      const [memberCount, shareCount] = await Promise.all([
+        countByCircleId(admin, "circle_members", cid),
+        countByCircleId(admin, "circle_emails", cid),
+      ])
+      return [cid, { memberCount, shareCount }] as const
+    })
+  )
+  const countByCircle = new Map(countPairs)
 
   const feed = shares.map((s) => {
     const e = emailById.get(s.email_id)
     const c = circleById.get(s.circle_id)
-    const p = s.shared_by ? profileById.get(s.shared_by) : null
+    const u = s.shared_by ? userById.get(s.shared_by) : null
+    const counts = countByCircle.get(s.circle_id)
+
+    const name =
+      (u?.display_name && u.display_name.trim()) ||
+      (u?.username && u.username.trim()) ||
+      "Member"
 
     return {
       id: s.id,
@@ -139,11 +183,12 @@ export async function GET(req: NextRequest) {
       emailId: s.email_id,
       sharedAt: s.created_at,
       sharedBy: s.shared_by ?? null,
+
       sharedByProfile: s.shared_by
         ? {
             id: s.shared_by,
-            name: p?.name ?? "Member",
-            avatarUrl: p?.avatar_url ?? null,
+            name,
+            avatarUrl: null as string | null, // ✅ users 테이블에 avatar 컬럼 없음
           }
         : null,
 
@@ -151,9 +196,13 @@ export async function GET(req: NextRequest) {
       fromAddress: e?.from_address ?? null,
       receivedAt: e?.received_at ?? null,
 
+      // (옵션) 나중에 집계 붙이기
       highlightCount: 0,
       commentCount: 0,
       latestActivity: null,
+
+      circleMemberCount: counts?.memberCount ?? null,
+      circleShareCount: counts?.shareCount ?? null,
     }
   })
 
