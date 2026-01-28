@@ -1,10 +1,11 @@
 {
   "compilerOptions": {
-    "lib": [
-      "dom",
-      "dom.iterable",
-      "esnext"
-    ],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*", "./src/*"]
+    },
+
+    "lib": ["dom", "dom.iterable", "esnext"],
     "allowJs": true,
     "target": "ES6",
     "skipLibCheck": true,
@@ -17,16 +18,7 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
-    "paths": {
-      "@/*": [
-        "./*"
-      ]
-    }
+    "plugins": [{ "name": "next" }]
   },
   "include": [
     "next-env.d.ts",
@@ -34,8 +26,6 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"
-, "app/(tabs)/inbox/[id]/.email-detail-client.tsx"  ],
-  "exclude": [
-    "node_modules"
-  ]
+  ],
+  "exclude": ["node_modules"]
 }

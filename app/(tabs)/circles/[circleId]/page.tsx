@@ -6,6 +6,7 @@ import { ArrowLeft, Users, Hash } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { ShineBorder } from "@/components/ui/shine-border"
 import CircleFeedClient from "./_components/CircleFeedClient"
+import type { CircleFeedApiResponse, CircleFeedItem } from "@/types/circle-feed"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -13,36 +14,14 @@ export const dynamic = "force-dynamic"
 type CircleApiResponse =
   | {
       ok: true
-      circle: {
-        id: string
-        name?: string | null
-        description?: string | null
-        [key: string]: any
-      }
+      circle: { id: string; name?: string | null; description?: string | null; [key: string]: any }
       counts: { members: number; shares: number }
     }
   | { ok: false; error?: string }
 
-type FeedItem = {
-  id: string
-  circleId: string
-  emailId: string
-  sharedAt: string
-  sharedBy: string | null
-  subject: string | null
-  fromAddress: string | null
-  receivedAt: string | null
-}
-
-type CircleFeedApiResponse =
-  | { ok: true; feed: FeedItem[]; nextCursor: string | null }
-  | { ok: false; error?: string }
-
-// ✅ baseUrl (env 우선, 없으면 요청 헤더 기반)
 async function getBaseUrl() {
   const envUrl = process.env.NEXT_PUBLIC_APP_URL?.trim()
   if (envUrl) return envUrl.replace(/\/+$/, "")
-
   const h = await headers()
   const proto = h.get("x-forwarded-proto") ?? "http"
   const host = h.get("x-forwarded-host") ?? h.get("host")
@@ -50,7 +29,6 @@ async function getBaseUrl() {
   return `${proto}://${host}`
 }
 
-// ✅ 서버에서 API 호출 시 쿠키 포워딩
 async function fetchJsonFromApi<T>(path: string): Promise<T> {
   const baseUrl = await getBaseUrl()
   const url = `${baseUrl}${path.startsWith("/") ? path : `/${path}`}`
@@ -63,9 +41,7 @@ async function fetchJsonFromApi<T>(path: string): Promise<T> {
 
   const res = await fetch(url, {
     cache: "no-store",
-    headers: {
-      ...(cookieHeader ? { cookie: cookieHeader } : {}),
-    },
+    headers: { ...(cookieHeader ? { cookie: cookieHeader } : {}) },
   })
 
   const text = await res.text()
@@ -78,7 +54,6 @@ async function fetchJsonFromApi<T>(path: string): Promise<T> {
     const msg = data?.error || text || `HTTP ${res.status}`
     throw new Error(msg)
   }
-
   return (data ?? {}) as T
 }
 
@@ -102,7 +77,6 @@ export default async function CircleDetailPage({
   const { circleId } = await params
   if (!circleId) notFound()
 
-  // 1) circle 메타 + 멤버십 체크(권한)은 API가 처리
   let circleRes: CircleApiResponse
   try {
     circleRes = await fetchJsonFromApi<CircleApiResponse>(`/api/circles/${circleId}`)
@@ -111,14 +85,14 @@ export default async function CircleDetailPage({
   }
   if (!circleRes.ok) notFound()
 
-  // 2) circle 전용 feed 초기 1페이지 SSR
   let feedRes: CircleFeedApiResponse
   try {
     feedRes = await fetchJsonFromApi<CircleFeedApiResponse>(`/api/circles/${circleId}/feed?limit=20`)
   } catch {
     feedRes = { ok: true, feed: [], nextCursor: null }
   }
-  const initialFeed = feedRes.ok ? (feedRes.feed ?? []) : []
+
+  const initialFeed: CircleFeedItem[] = feedRes.ok ? (feedRes.feed ?? []) : []
   const initialNextCursor = feedRes.ok ? (feedRes.nextCursor ?? null) : null
 
   const circle = circleRes.circle
@@ -126,7 +100,6 @@ export default async function CircleDetailPage({
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-6">
-      {/* Header */}
       <div className="mb-6 flex items-center gap-3">
         <Link
           href="/circles"
@@ -139,9 +112,14 @@ export default async function CircleDetailPage({
           <h1 className="truncate text-2xl font-semibold text-foreground">{circle?.name ?? "Circle"}</h1>
           <p className="text-sm text-muted-foreground">Circle detail</p>
         </div>
+
+        <div className="ml-auto hidden sm:block">
+          <Button variant="secondary" className="rounded-xl">
+            Settings
+          </Button>
+        </div>
       </div>
 
-      {/* Stats */}
       <ShineBorder
         className="mb-6 shadow-sm ring-1 ring-border"
         borderRadius={16}
@@ -164,23 +142,7 @@ export default async function CircleDetailPage({
         </div>
       </ShineBorder>
 
-      {/* Feed header */}
-      <div className="mb-3 flex items-end justify-between">
-        <div>
-          <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">Shared emails</h2>
-          <p className="text-xs text-muted-foreground mt-1">Infinite scroll enabled.</p>
-        </div>
-        <Button variant="secondary" className="rounded-xl">
-          Invite
-        </Button>
-      </div>
-
-      {/* ✅ Client infinite feed */}
-      <CircleFeedClient
-        circleId={circleId}
-        initialFeed={initialFeed}
-        initialNextCursor={initialNextCursor}
-      />
+      <CircleFeedClient circleId={circleId} initialFeed={initialFeed} initialNextCursor={initialNextCursor} />
     </div>
   )
 }
