@@ -22,7 +22,7 @@ type FeedItem = {
   commentCount?: number
   latestActivity?: string | null
 
-  // (옵션) 백엔드가 내려주면 사용
+  // 백엔드가 내려주는 DB 기준 카운트
   circleMemberCount?: number | null
   circleShareCount?: number | null
 }
@@ -65,27 +65,8 @@ function inferTopic(input: { subject?: string | null; from?: string | null }) {
   const s = `${input.subject ?? ""} ${input.from ?? ""}`.toLowerCase()
 
   const rules: Array<{ topic: string; keywords: string[] }> = [
-    {
-      topic: "AI",
-      keywords: ["ai", "gpt", "openai", "anthropic", "claude", "gemini", "deepmind", "nvidia", "llm", "agent"],
-    },
-    {
-      topic: "Markets",
-      keywords: [
-        "market",
-        "stocks",
-        "etf",
-        "earnings",
-        "yield",
-        "inflation",
-        "fed",
-        "rates",
-        "crypto",
-        "bitcoin",
-        "nasdaq",
-        "s&p",
-      ],
-    },
+    { topic: "AI", keywords: ["ai", "gpt", "openai", "anthropic", "claude", "gemini", "deepmind", "nvidia", "llm", "agent"] },
+    { topic: "Markets", keywords: ["market", "stocks", "etf", "earnings", "yield", "inflation", "fed", "rates", "crypto", "bitcoin", "nasdaq", "s&p"] },
     { topic: "Korea", keywords: ["kospi", "kosdaq", "krx", "seoul", "won", "samsung", "sk hynix", "korea"] },
     { topic: "Startups", keywords: ["startup", "funding", "seed", "series a", "vc", "pitch", "y combinator", "yc"] },
     { topic: "Design", keywords: ["design", "figma", "ux", "ui", "dribbble", "lottie", "accessibility", "wcag"] },
@@ -107,29 +88,19 @@ type TopicFeedItem = {
   senderName: string
   sharedAt: string
 
-  // (옵션) 백엔드가 내려주면 사용
+  // DB 기준 카운트
   circleMemberCount?: number | null
   circleShareCount?: number | null
 }
 
-function TopicChip({
-  topic,
-  active,
-  onClick,
-}: {
-  topic: string
-  active?: boolean
-  onClick?: () => void
-}) {
+function TopicChip({ topic, active, onClick }: { topic: string; active?: boolean; onClick?: () => void }) {
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
         "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors",
-        active
-          ? "bg-primary text-primary-foreground"
-          : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+        active ? "bg-primary text-primary-foreground" : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
       )}
     >
       {topic}
@@ -137,15 +108,7 @@ function TopicChip({
   )
 }
 
-function StatPill({
-  icon,
-  children,
-  title,
-}: {
-  icon: React.ReactNode
-  children: React.ReactNode
-  title?: string
-}) {
+function StatPill({ icon, children, title }: { icon: React.ReactNode; children: React.ReactNode; title?: string }) {
   return (
     <span
       title={title}
@@ -171,7 +134,7 @@ function FeedCardComponent({
   onOpenCircle: () => void
   onClickTopic: (topic: string) => void
   isTopicActive: boolean
-  circleShareCount: number
+  circleShareCount: number | null
   circleMemberCount: number | null
 }) {
   return (
@@ -179,11 +142,7 @@ function FeedCardComponent({
       <div className="flex items-start justify-between gap-2 mb-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <TopicChip
-              topic={item.topic}
-              active={isTopicActive}
-              onClick={() => onClickTopic(item.topic)}
-            />
+            <TopicChip topic={item.topic} active={isTopicActive} onClick={() => onClickTopic(item.topic)} />
 
             <button
               type="button"
@@ -197,17 +156,16 @@ function FeedCardComponent({
 
             <div className="ml-auto flex items-center gap-1">
               {circleMemberCount !== null ? (
-                <StatPill
-                  title="Members"
-                  icon={<Users className="h-3 w-3" />}
-                >
+                <StatPill title="Members" icon={<Users className="h-3 w-3" />}>
                   {circleMemberCount}
                 </StatPill>
               ) : null}
 
-              <StatPill title="Shares in this feed (loaded)" icon={<Hash className="h-3 w-3" />}>
-                {circleShareCount}
-              </StatPill>
+              {circleShareCount !== null ? (
+                <StatPill title="Shares (DB total)" icon={<Hash className="h-3 w-3" />}>
+                  {circleShareCount}
+                </StatPill>
+              ) : null}
             </div>
           </div>
 
@@ -387,30 +345,17 @@ export default function TopicsPage() {
     setActiveTopic((prev) => (prev === topic ? null : topic))
   }
 
-  // ✅ circle별 share count(현재 로드된 items 기준) 계산
-  const shareCountByCircleId = useMemo(() => {
-    const m = new Map<string, number>()
-    for (const it of items) {
-      m.set(it.circleId, (m.get(it.circleId) ?? 0) + 1)
-    }
-    return m
-  }, [items])
-
-  // ✅ topic별 카운트 + 정렬된 topic 목록
   const topicCounts = useMemo(() => {
     const m = new Map<string, number>()
     for (const it of items) m.set(it.topic, (m.get(it.topic) ?? 0) + 1)
-    const arr = Array.from(m.entries()).sort((a, b) => b[1] - a[1])
-    return arr
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1])
   }, [items])
 
-  // ✅ 필터 적용된 리스트
   const visibleItems = useMemo(() => {
     if (!activeTopic) return items
     return items.filter((it) => it.topic === activeTopic)
   }, [items, activeTopic])
 
-  // ✅ topic별 그룹핑 (섹션 렌더용)
   const groupedByTopic = useMemo(() => {
     const groups = new Map<string, TopicFeedItem[]>()
     for (const it of visibleItems) {
@@ -418,12 +363,10 @@ export default function TopicsPage() {
       arr.push(it)
       groups.set(it.topic, arr)
     }
-    // 각 그룹 내 최신순
     for (const [k, arr] of groups.entries()) {
       arr.sort((a, b) => new Date(b.sharedAt).getTime() - new Date(a.sharedAt).getTime())
       groups.set(k, arr)
     }
-    // 섹션 순서: topicCounts(빈도순) 우선, 그 외 알파벳
     const orderedTopics = [
       ...topicCounts.map(([t]) => t).filter((t) => groups.has(t)),
       ...Array.from(groups.keys()).filter((t) => !topicCounts.some(([x]) => x === t)).sort(),
@@ -431,7 +374,6 @@ export default function TopicsPage() {
     return { groups, orderedTopics }
   }, [visibleItems, topicCounts])
 
-  // ✅ 카드 렌더 helper
   const renderCards = (list: TopicFeedItem[]) => {
     const cards = list.map((item) => (
       <FeedCardComponent
@@ -441,16 +383,12 @@ export default function TopicsPage() {
         onOpenCircle={() => handleOpenCircle(item.circleId)}
         onClickTopic={handleToggleTopic}
         isTopicActive={activeTopic === item.topic}
-        circleShareCount={shareCountByCircleId.get(item.circleId) ?? 0}
+        circleShareCount={item.circleShareCount ?? null}
         circleMemberCount={item.circleMemberCount ?? null}
       />
     ))
 
-    return layout === "list" ? (
-      <div className="space-y-4">{cards}</div>
-    ) : (
-      <MasonryGrid>{cards}</MasonryGrid>
-    )
+    return layout === "list" ? <div className="space-y-4">{cards}</div> : <MasonryGrid>{cards}</MasonryGrid>
   }
 
   return (
@@ -479,7 +417,6 @@ export default function TopicsPage() {
           </button>
         </div>
 
-        {/* ✅ Topic Filter Bar */}
         {activeTab === "feed" && (
           <div className="mx-4 mt-3 flex items-center gap-2 overflow-x-auto pb-1">
             <TopicChip topic="All" active={!activeTopic} onClick={() => setActiveTopic(null)} />
@@ -490,9 +427,7 @@ export default function TopicsPage() {
                 onClick={() => handleToggleTopic(t)}
                 className={cn(
                   "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors whitespace-nowrap",
-                  activeTopic === t
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                  activeTopic === t ? "bg-primary text-primary-foreground" : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
                 )}
               >
                 {t}
@@ -516,7 +451,6 @@ export default function TopicsPage() {
           <div className="text-sm text-muted-foreground">No feed yet. Share a newsletter to a circle.</div>
         ) : (
           <div className="space-y-8">
-            {/* ✅ Topic Sections (그룹핑) */}
             {groupedByTopic.orderedTopics.map((topic) => {
               const list = groupedByTopic.groups.get(topic) ?? []
               if (list.length === 0) return null
@@ -555,7 +489,6 @@ export default function TopicsPage() {
           </div>
         )}
 
-        {/* infinite scroll sentinel */}
         {activeTab === "feed" && (
           <div ref={sentinelRef} className="mt-6 flex items-center justify-center py-6">
             {loadingMore ? (
