@@ -1,60 +1,95 @@
 // app/api/circles/[circleId]/route.ts
-import { NextResponse } from "next/server"
-import { createClient } from "@supabase/supabase-js"
+import { NextRequest, NextResponse } from "next/server"
+import { cookies } from "next/headers"
+import { createServerClient } from "@supabase/ssr"
+import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-function isUuid(v: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)
+async function createSupabaseAuthedServerClient() {
+  const cookieStore = await cookies() // Next15: Promise
+  return createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        get(name: string) {
+          return cookieStore.get(name)?.value
+        },
+        set() {},
+        remove() {},
+      },
+    }
+  )
 }
-
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
-
-// env 체크는 모듈 로딩 시점에 해두는 게 디버깅이 쉬움
-if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  // Route handler에서는 throw해도 dev에서 바로 원인 파악 가능
-  // (prod에선 500으로 떨어짐)
-  throw new Error("Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY")
-}
-
-const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
-  auth: { persistSession: false }, // 서버 라우트에서는 세션 저장 불필요
-})
 
 export async function GET(
-  _req: Request,
-  { params }: { params: { circleId: string } }
+  _req: NextRequest,
+  context: { params: Promise<{ circleId: string }> }
 ) {
-  const circleId = params.circleId
+  try {
+    const { circleId } = await context.params
+    if (!circleId) return NextResponse.json({ ok: false, error: "Missing circleId" }, { status: 400 })
 
-  if (!circleId || !isUuid(circleId)) {
+    // ✅ 로그인 유저 확인
+    const supabaseAuth = await createSupabaseAuthedServerClient()
+    const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
+    const user = userData?.user
+
+    if (userErr || !user) {
+      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
+    }
+
+    const admin = createSupabaseAdminClient()
+
+    // ✅ 권한(멤버십) 체크: 멤버가 아니면 존재 자체를 숨기기 위해 404
+    const { data: membership, error: memErr } = await admin
+      .from("circle_members")
+      .select("id")
+      .eq("circle_id", circleId)
+      .eq("user_id", user.id)
+      .maybeSingle()
+
+    if (memErr) {
+      return NextResponse.json({ ok: false, error: memErr.message }, { status: 500 })
+    }
+    if (!membership) {
+      return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
+    }
+
+    // ✅ circle 데이터
+    const { data: circle, error: circleErr } = await admin
+      .from("circles")
+      .select("*")
+      .eq("id", circleId)
+      .single()
+
+    if (circleErr || !circle) {
+      return NextResponse.json({ ok: false, error: "Not found" }, { status: 404 })
+    }
+
+    // ✅ counts (DB 기준)
+    const [{ count: memberCount }, { count: shareCount }] = await Promise.all([
+      admin.from("circle_members").select("id", { head: true, count: "exact" }).eq("circle_id", circleId),
+      admin.from("circle_emails").select("id", { head: true, count: "exact" }).eq("circle_id", circleId),
+    ])
+
     return NextResponse.json(
-      { ok: false, error: "Invalid circleId" },
-      { status: 400 }
+      {
+        ok: true,
+        circle,
+        counts: {
+          members: Number(memberCount ?? 0),
+          shares: Number(shareCount ?? 0),
+        },
+      },
+      { status: 200, headers: { "Cache-Control": "no-store" } }
+    )
+  } catch (e: any) {
+    return NextResponse.json(
+      { ok: false, error: e?.message ?? "Unknown error" },
+      { status: 500, headers: { "Cache-Control": "no-store" } }
     )
   }
-
-  const { data, error } = await supabase
-    .from("circles")
-    .select("*")
-    .eq("id", circleId)
-    .maybeSingle()
-
-  if (error) {
-    return NextResponse.json(
-      { ok: false, error: error.message },
-      { status: 400 }
-    )
-  }
-
-  if (!data) {
-    return NextResponse.json(
-      { ok: false, error: "Circle not found" },
-      { status: 404 }
-    )
-  }
-
-  return NextResponse.json({ ok: true, circle: data }, { status: 200 })
 }
