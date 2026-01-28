@@ -1,4 +1,3 @@
-// app/api/circles/feed/route.ts
 import { NextRequest, NextResponse } from "next/server"
 import { cookies } from "next/headers"
 import { createServerClient } from "@supabase/ssr"
@@ -8,7 +7,7 @@ export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
 async function createSupabaseAuthedServerClient() {
-  const cookieStore = await cookies() // Next15: Promise
+  const cookieStore = await cookies() // Next15 Promise
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -24,197 +23,139 @@ async function createSupabaseAuthedServerClient() {
   )
 }
 
-type CursorPayload = { created_at: string; id: string }
-
-function encodeCursor(payload: CursorPayload) {
-  return Buffer.from(JSON.stringify(payload)).toString("base64url")
-}
-
-function decodeCursor(raw: string): CursorPayload | null {
-  try {
-    const json = Buffer.from(raw, "base64url").toString("utf8")
-    const parsed = JSON.parse(json)
-    if (!parsed?.created_at || !parsed?.id) return null
-    return { created_at: String(parsed.created_at), id: String(parsed.id) }
-  } catch {
-    return null
-  }
-}
-
-async function countByCircleIdExact(
-  admin: ReturnType<typeof createSupabaseAdminClient>,
-  table: "circle_members" | "circle_emails",
-  circleIds: string[]
-) {
-  const map = new Map<string, number>()
-
-  // Supabase/PostgREST에서 group-by count가 애매해서,
-  // ✅ "head:true + count:exact"로 circleId별 count만 가져옴 (데이터 row는 내려받지 않음)
-  await Promise.all(
-    circleIds.map(async (circleId) => {
-      const { count, error } = await admin
-        .from(table)
-        .select("id", { count: "exact", head: true })
-        .eq("circle_id", circleId)
-
-      if (error) {
-        // 카운트 실패는 전체 실패로 만들지 말고 0 처리
-        map.set(circleId, 0)
-        return
-      }
-
-      map.set(circleId, Number(count ?? 0))
-    })
-  )
-
-  return map
-}
-
+/**
+ * Cursor pagination:
+ * - cursor = ISO timestamp of last item's sharedAt
+ * - fetch created_at < cursor
+ */
 export async function GET(req: NextRequest) {
-  try {
-    const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") ?? 20), 100)
-    const cursorRaw = req.nextUrl.searchParams.get("cursor")
-    const cursor = cursorRaw ? decodeCursor(cursorRaw) : null
+  const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") ?? 20), 50)
+  const cursor = req.nextUrl.searchParams.get("cursor") // ISO string
+  const supabaseAuth = await createSupabaseAuthedServerClient()
+  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
+  const user = userData?.user
 
-    // ✅ 로그인 유저 확인
-    const supabaseAuth = await createSupabaseAuthedServerClient()
-    const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
-    const user = userData?.user
-
-    if (userErr || !user) {
-      return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
-    }
-
-    const admin = createSupabaseAdminClient()
-
-    // 1) 내가 속한 circle_id 목록
-    const { data: memberships, error: memErr } = await admin
-      .from("circle_members")
-      .select("circle_id")
-      .eq("user_id", user.id)
-
-    if (memErr) return NextResponse.json({ ok: false, error: memErr.message }, { status: 500 })
-
-    const circleIds = (memberships ?? []).map((m: any) => m.circle_id).filter(Boolean)
-    if (circleIds.length === 0) {
-      return NextResponse.json(
-        { ok: true, items: [], feed: [], nextCursor: null },
-        { status: 200, headers: { "Cache-Control": "no-store" } }
-      )
-    }
-
-    // 2) circle_emails 최근 공유글 (cursor paging)
-    let q = admin
-      .from("circle_emails")
-      .select("id, circle_id, email_id, shared_by, created_at")
-      .in("circle_id", circleIds)
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(limit + 1)
-
-    // cursor: (created_at, id) 기준으로 이전 것들만
-    if (cursor) {
-      q = q.or(
-        `created_at.lt.${cursor.created_at},and(created_at.eq.${cursor.created_at},id.lt.${cursor.id})`
-      )
-    }
-
-    const { data: sharesRaw, error: shareErr } = await q
-    if (shareErr) return NextResponse.json({ ok: false, error: shareErr.message }, { status: 500 })
-
-    const sharesAll = sharesRaw ?? []
-    const hasMore = sharesAll.length > limit
-    const shares = hasMore ? sharesAll.slice(0, limit) : sharesAll
-
-    const nextCursor =
-      hasMore && shares.length
-        ? encodeCursor({
-            created_at: shares[shares.length - 1].created_at,
-            id: shares[shares.length - 1].id,
-          })
-        : null
-
-    if (shares.length === 0) {
-      return NextResponse.json(
-        { ok: true, items: [], feed: [], nextCursor },
-        { status: 200, headers: { "Cache-Control": "no-store" } }
-      )
-    }
-
-    // 3) circleName 붙이기
-    const circleIdsOnPage = Array.from(new Set(shares.map((s: any) => s.circle_id).filter(Boolean)))
-
-    const { data: circles, error: circlesErr } = await admin
-      .from("circles")
-      .select("id, name")
-      .in("id", circleIdsOnPage)
-
-    if (circlesErr) return NextResponse.json({ ok: false, error: circlesErr.message }, { status: 500 })
-    const circleNameById = new Map((circles ?? []).map((c: any) => [c.id, c.name]))
-
-    // ✅ 3-1) circle_member_count / circle_share_count (실제 DB 기준)
-    const [memberCountByCircleId, shareCountByCircleId] = await Promise.all([
-      countByCircleIdExact(admin, "circle_members", circleIdsOnPage),
-      countByCircleIdExact(admin, "circle_emails", circleIdsOnPage),
-    ])
-
-    // 4) inbox_emails 메타 붙이기
-    const emailIds = Array.from(new Set(shares.map((s: any) => s.email_id).filter(Boolean)))
-    const { data: emails, error: emailErr } = await admin
-      .from("inbox_emails")
-      .select("id, subject, from_address, received_at")
-      .in("id", emailIds)
-
-    if (emailErr) return NextResponse.json({ ok: false, error: emailErr.message }, { status: 500 })
-    const emailById = new Map((emails ?? []).map((e: any) => [e.id, e]))
-
-    // ✅ (A) 프론트(원래 기대) 구조: items + email + circle_name + counts
-    const items = shares.map((s: any) => {
-      const email = emailById.get(s.email_id) ?? null
-      const circleId = s.circle_id
-      return {
-        id: s.id,
-        circle_id: circleId,
-        circle_name: circleNameById.get(circleId) ?? null,
-        circle_member_count: memberCountByCircleId.get(circleId) ?? 0,
-        circle_share_count: shareCountByCircleId.get(circleId) ?? 0,
-        email_id: s.email_id,
-        shared_by: s.shared_by ?? null,
-        created_at: s.created_at,
-        email,
-      }
-    })
-
-    // ✅ (B) flat 구조: feed + counts
-    const feed = shares.map((s: any) => {
-      const e = emailById.get(s.email_id)
-      const circleId = s.circle_id
-      return {
-        id: s.id,
-        circleId,
-        circleName: circleNameById.get(circleId) ?? null,
-        circleMemberCount: memberCountByCircleId.get(circleId) ?? 0,
-        circleShareCount: shareCountByCircleId.get(circleId) ?? 0,
-        emailId: s.email_id,
-        sharedAt: s.created_at,
-        sharedBy: s.shared_by ?? null,
-        subject: e?.subject ?? null,
-        fromAddress: e?.from_address ?? null,
-        receivedAt: e?.received_at ?? null,
-        highlightCount: 0,
-        commentCount: 0,
-        latestActivity: null,
-      }
-    })
-
-    return NextResponse.json(
-      { ok: true, items, feed, nextCursor },
-      { status: 200, headers: { "Cache-Control": "no-store" } }
-    )
-  } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, error: e?.message ?? "Unknown error" },
-      { status: 500, headers: { "Cache-Control": "no-store" } }
-    )
+  if (userErr || !user) {
+    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
   }
+
+  const admin = createSupabaseAdminClient()
+
+  // 1) my circle ids
+  const { data: memberships, error: memErr } = await admin
+    .from("circle_members")
+    .select("circle_id")
+    .eq("user_id", user.id)
+
+  if (memErr) return NextResponse.json({ ok: false, error: memErr.message }, { status: 500 })
+
+  const circleIds = (memberships ?? []).map((m: any) => m.circle_id).filter(Boolean)
+  if (circleIds.length === 0) {
+    return NextResponse.json({ ok: true, feed: [], nextCursor: null }, { status: 200 })
+  }
+
+  // 2) circle_emails (shared items)
+  let shareQuery = admin
+    .from("circle_emails")
+    .select("id, circle_id, email_id, shared_by, created_at")
+    .in("circle_id", circleIds)
+    .order("created_at", { ascending: false })
+    .limit(limit)
+
+  if (cursor) shareQuery = shareQuery.lt("created_at", cursor)
+
+  const { data: sharesRaw, error: shareErr } = await shareQuery
+  if (shareErr) return NextResponse.json({ ok: false, error: shareErr.message }, { status: 500 })
+
+  const shares = (sharesRaw ?? []) as Array<{
+    id: string
+    circle_id: string
+    email_id: string
+    shared_by: string | null
+    created_at: string
+  }>
+
+  if (shares.length === 0) {
+    return NextResponse.json({ ok: true, feed: [], nextCursor: null }, { status: 200 })
+  }
+
+  const nextCursor = shares.length === limit ? shares[shares.length - 1]?.created_at ?? null : null
+
+  const emailIds = Array.from(new Set(shares.map((s) => s.email_id).filter(Boolean)))
+  const circleIdSet = Array.from(new Set(shares.map((s) => s.circle_id).filter(Boolean)))
+  const userIds = Array.from(new Set(shares.map((s) => s.shared_by).filter(Boolean))) as string[]
+
+  // 3) inbox_emails meta
+  const { data: emailsRaw, error: emailErr } = await admin
+    .from("inbox_emails")
+    .select("id, subject, from_address, received_at")
+    .in("id", emailIds)
+
+  if (emailErr) return NextResponse.json({ ok: false, error: emailErr.message }, { status: 500 })
+
+  const emails = (emailsRaw ?? []) as Array<{
+    id: string
+    subject: string | null
+    from_address: string | null
+    received_at: string | null
+  }>
+  const emailById = new Map(emails.map((e) => [e.id, e]))
+
+  // 4) circles meta (name)
+  const { data: circlesRaw, error: circleErr } = await admin
+    .from("circles")
+    .select("id, name")
+    .in("id", circleIdSet)
+
+  if (circleErr) return NextResponse.json({ ok: false, error: circleErr.message }, { status: 500 })
+
+  const circles = (circlesRaw ?? []) as Array<{ id: string; name: string | null }>
+  const circleById = new Map(circles.map((c) => [c.id, c]))
+
+  // 5) sharedBy profile (name/avatar)
+  // ⚠️ 너희 프로젝트 테이블명이 profiles 아닐 수도 있음.
+  // 보통은 profiles(id, name, avatar_url) 형태.
+  const { data: profilesRaw, error: profErr } = await admin
+    .from("profiles")
+    .select("id, name, avatar_url")
+    .in("id", userIds)
+
+  // profiles 테이블이 없으면: 에러를 무시하고 null로 내려줌 (피드 표시가 죽지 않게)
+  const profiles =
+    profErr || !profilesRaw
+      ? []
+      : ((profilesRaw ?? []) as Array<{ id: string; name: string | null; avatar_url: string | null }>)
+  const profileById = new Map(profiles.map((p) => [p.id, p]))
+
+  const feed = shares.map((s) => {
+    const e = emailById.get(s.email_id)
+    const c = circleById.get(s.circle_id)
+    const p = s.shared_by ? profileById.get(s.shared_by) : null
+
+    return {
+      id: s.id,
+      circleId: s.circle_id,
+      circleName: c?.name ?? "Circle",
+      emailId: s.email_id,
+      sharedAt: s.created_at,
+      sharedBy: s.shared_by ?? null,
+      sharedByProfile: s.shared_by
+        ? {
+            id: s.shared_by,
+            name: p?.name ?? "Member",
+            avatarUrl: p?.avatar_url ?? null,
+          }
+        : null,
+
+      subject: e?.subject ?? null,
+      fromAddress: e?.from_address ?? null,
+      receivedAt: e?.received_at ?? null,
+
+      highlightCount: 0,
+      commentCount: 0,
+      latestActivity: null,
+    }
+  })
+
+  return NextResponse.json({ ok: true, feed, nextCursor }, { status: 200 })
 }

@@ -28,7 +28,7 @@ type FeedItem = {
 }
 
 type ApiFeedResponse =
-  | { ok: true; items?: any[]; feed?: FeedItem[]; nextCursor?: string | null }
+  | { ok: true; feed: any[]; nextCursor: string | null }
   | { ok: false; error?: string }
 
 // --- Helpers ---
@@ -65,8 +65,14 @@ function inferTopic(input: { subject?: string | null; from?: string | null }) {
   const s = `${input.subject ?? ""} ${input.from ?? ""}`.toLowerCase()
 
   const rules: Array<{ topic: string; keywords: string[] }> = [
-    { topic: "AI", keywords: ["ai", "gpt", "openai", "anthropic", "claude", "gemini", "deepmind", "nvidia", "llm", "agent"] },
-    { topic: "Markets", keywords: ["market", "stocks", "etf", "earnings", "yield", "inflation", "fed", "rates", "crypto", "bitcoin", "nasdaq", "s&p"] },
+    {
+      topic: "AI",
+      keywords: ["ai", "gpt", "openai", "anthropic", "claude", "gemini", "deepmind", "nvidia", "llm", "agent"],
+    },
+    {
+      topic: "Markets",
+      keywords: ["market", "stocks", "etf", "earnings", "yield", "inflation", "fed", "rates", "crypto", "bitcoin", "nasdaq", "s&p"],
+    },
     { topic: "Korea", keywords: ["kospi", "kosdaq", "krx", "seoul", "won", "samsung", "sk hynix", "korea"] },
     { topic: "Startups", keywords: ["startup", "funding", "seed", "series a", "vc", "pitch", "y combinator", "yc"] },
     { topic: "Design", keywords: ["design", "figma", "ux", "ui", "dribbble", "lottie", "accessibility", "wcag"] },
@@ -228,31 +234,15 @@ export default function TopicsPage() {
     })
 
     const data = await safeReadJson<ApiFeedResponse>(res)
-    if (!res.ok || !data?.ok) throw new Error((data as any)?.error ?? `HTTP ${res.status}`)
+    if (!res.ok || !(data as any)?.ok) throw new Error((data as any)?.error ?? `HTTP ${res.status}`)
 
-    const rows = Array.isArray((data as any).items) ? (data as any).items : []
-    const feed = Array.isArray((data as any).feed) ? (data as any).feed : []
+    // v2(feed) 기준 우선 사용, (구버전 items/feed)도 fallback
+    const feed = Array.isArray((data as any).feed) ? ((data as any).feed as FeedItem[]) : []
+    const legacyItems = Array.isArray((data as any).items) ? (data as any).items : [] // (구형 대비)
 
     const mapped: TopicFeedItem[] =
-      rows.length > 0
-        ? rows.map((row: any) => {
-            const subject = row.email?.subject ?? "(no subject)"
-            const from = row.email?.from_address ?? "Unknown"
-            const topic = inferTopic({ subject, from })
-            return {
-              id: row.id,
-              emailId: row.email_id,
-              circleId: row.circle_id,
-              circleName: row.circle_name ?? "Circle",
-              topic,
-              newsletterTitle: subject,
-              senderName: extractNameFromEmail(from),
-              sharedAt: row.created_at,
-              circleMemberCount: row.circle_member_count ?? null,
-              circleShareCount: row.circle_share_count ?? null,
-            }
-          })
-        : feed.map((row: any) => {
+      feed.length > 0
+        ? feed.map((row: any) => {
             const subject = row.subject ?? "(no subject)"
             const from = row.fromAddress ?? "Unknown"
             const topic = inferTopic({ subject, from })
@@ -267,6 +257,24 @@ export default function TopicsPage() {
               sharedAt: row.sharedAt,
               circleMemberCount: row.circleMemberCount ?? null,
               circleShareCount: row.circleShareCount ?? null,
+            }
+          })
+        : legacyItems.map((row: any) => {
+            // legacy shape: { id, circle_id, circle_name, email_id, created_at, email: { subject, from_address } }
+            const subject = row.email?.subject ?? "(no subject)"
+            const from = row.email?.from_address ?? "Unknown"
+            const topic = inferTopic({ subject, from })
+            return {
+              id: row.id,
+              emailId: row.email_id,
+              circleId: row.circle_id,
+              circleName: row.circle_name ?? "Circle",
+              topic,
+              newsletterTitle: subject,
+              senderName: extractNameFromEmail(from),
+              sharedAt: row.created_at,
+              circleMemberCount: row.circle_member_count ?? null,
+              circleShareCount: row.circle_share_count ?? null,
             }
           })
 
