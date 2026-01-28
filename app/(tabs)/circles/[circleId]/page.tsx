@@ -1,254 +1,230 @@
-"use client"
-
-import { useEffect, useMemo, useState } from "react"
+// app/circles/[circleId]/page.tsx
 import Link from "next/link"
-import { useParams } from "next/navigation"
-import { ChevronLeft, MessageSquare, Highlighter } from "lucide-react"
-import { emailDetailHref } from "@/lib/email-href"
+import { notFound } from "next/navigation"
+import { ArrowLeft, Users, Hash, Mail } from "lucide-react"
+import { Button } from "@/components/ui/button"
+import { ShineBorder } from "@/components/ui/shine-border"
 
-type Circle = {
-  id: string
-  name: string | null
-  memberCount?: number
-}
+export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
+
+type CircleApiResponse =
+  | {
+      ok: true
+      circle: {
+        id: string
+        name?: string | null
+        created_at?: string | null
+        owner_id?: string | null
+        description?: string | null
+        [key: string]: any
+      }
+      counts: { members: number; shares: number }
+    }
+  | { ok: false; error?: string }
 
 type FeedItem = {
   id: string
+  circleId: string
+  circleName?: string | null
   emailId: string
-  sharedAt: string // ISO
-  sharedBy?: string | null
-
+  sharedAt: string
+  sharedBy: string | null
   subject: string | null
   fromAddress: string | null
   receivedAt: string | null
-
   highlightCount?: number
   commentCount?: number
   latestActivity?: string | null
 }
 
-type ApiCircleResponse = { ok: true; circle: Circle } | { ok: false; error?: string }
+type FeedApiResponse =
+  | { ok: true; items?: any[]; feed?: FeedItem[]; nextCursor?: string | null }
+  | { ok: false; error?: string }
 
-// ✅ backend(/api/circles/[circleId]/feed) 응답 형태: { ok:true, items:[...] }
-type ApiFeedItemRaw = {
-  id: string
-  circleId: string
-  emailId: string
-  sharedBy?: string | null
-  sharedAt: string
-  email: {
-    id: string
-    subject: string | null
-    fromAddress: string | null
-    receivedAt: string | null
-  } | null
-}
-type ApiFeedResponse = { ok: true; items: ApiFeedItemRaw[] } | { ok: false; error?: string }
-
-async function safeReadJson<T>(res: Response): Promise<T> {
+async function safeFetchJson<T>(url: string): Promise<T> {
+  const res = await fetch(url, { cache: "no-store", credentials: "include" as any })
   const text = await res.text()
+  let data: any = null
   try {
-    return JSON.parse(text) as T
+    data = JSON.parse(text)
   } catch {
-    return { ok: false, error: text || `HTTP ${res.status}` } as unknown as T
+    // ignore
   }
+  if (!res.ok) {
+    const msg = data?.error || text || `HTTP ${res.status}`
+    throw new Error(msg)
+  }
+  return (data ?? {}) as T
 }
 
-function formatRelative(iso: string) {
+function fmtDate(iso: string | null) {
+  if (!iso) return "—"
   const d = new Date(iso)
-  const now = new Date()
-  const diff = now.getTime() - d.getTime()
-  const mins = Math.floor(diff / 60000)
-  const hours = Math.floor(diff / 3600000)
-  const days = Math.floor(diff / 86400000)
-  if (mins < 1) return "just now"
-  if (mins < 60) return `${mins}m ago`
-  if (hours < 24) return `${hours}h ago`
-  if (days < 7) return `${days}d ago`
-  return d.toLocaleDateString()
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "2-digit" })
 }
 
-function SharedNewsletterCard({ item }: { item: FeedItem }) {
-  const href = emailDetailHref(item.emailId) ?? "#"
-  const initials = (item.fromAddress ?? "??").slice(0, 2).toUpperCase()
+function extractNameFromEmail(addr: string | null) {
+  if (!addr) return "Unknown"
+  const emailMatch = addr.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)
+  const email = emailMatch?.[0] ?? addr
+  const name = email.split("@")[0]
+  return name || email
+}
 
+function CircleStat({ icon, label, value }: { icon: React.ReactNode; label: string; value: number }) {
   return (
-    <Link href={href}>
-      <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border transition-shadow hover:shadow-md">
-        <div className="flex items-center gap-2 mb-2">
-          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-secondary text-[10px] font-semibold text-muted-foreground">
-            {initials}
+    <div className="flex items-center gap-2 rounded-xl bg-secondary px-3 py-2">
+      <span className="text-muted-foreground">{icon}</span>
+      <div className="flex flex-col leading-tight">
+        <span className="text-[11px] text-muted-foreground">{label}</span>
+        <span className="text-sm font-semibold text-foreground">{value}</span>
+      </div>
+    </div>
+  )
+}
+
+function ShareRow({
+  subject,
+  fromAddress,
+  sharedAt,
+  emailId,
+}: {
+  subject: string
+  fromAddress: string | null
+  sharedAt: string
+  emailId: string
+}) {
+  return (
+    <Link
+      href={`/inbox/${emailId}`}
+      prefetch={false}
+      className="block rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md"
+    >
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-xl bg-secondary">
+          <Mail className="h-4 w-4 text-secondary-foreground" />
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-xs text-muted-foreground truncate">
+              from {extractNameFromEmail(fromAddress)}
+            </p>
+            <p className="text-xs text-muted-foreground">{fmtDate(sharedAt)}</p>
           </div>
-          <span className="text-xs text-muted-foreground">{item.fromAddress ?? "Unknown"}</span>
-          <span className="text-xs text-muted-foreground/50">·</span>
-          <span className="text-xs text-muted-foreground">{formatRelative(item.sharedAt)}</span>
+
+          <h3 className="mt-1 text-sm font-semibold leading-snug text-foreground line-clamp-2">
+            {subject}
+          </h3>
         </div>
-
-        <h3 className="font-medium text-card-foreground line-clamp-2 mb-3">
-          {item.subject ?? "(no subject)"}
-        </h3>
-
-        <div className="flex items-center gap-3 text-xs text-muted-foreground mb-2">
-          <span className="flex items-center gap-1">
-            <Highlighter className="h-3.5 w-3.5" />
-            {item.highlightCount ?? 0}
-          </span>
-          <span className="flex items-center gap-1">
-            <MessageSquare className="h-3.5 w-3.5" />
-            {item.commentCount ?? 0}
-          </span>
-        </div>
-
-        <p className="text-sm text-muted-foreground truncate">
-          {item.latestActivity ?? "New share"}
-        </p>
       </div>
     </Link>
   )
 }
 
-export default function CircleDetailPage() {
-  const params = useParams()
+export default async function CircleDetailPage({
+  params,
+}: {
+  params: Promise<{ circleId: string }>
+}) {
+  const { circleId } = await params
+  if (!circleId) notFound()
 
-  // ✅ 폴더명이 [circlesID] 이므로 여기 키도 circlesID
-  const circleId = String((params as any)?.circleId ?? (params as any)?.id ?? "").trim()
+  // ✅ (1) circle 메타 + 권한(멤버십) 체크는 API가 수행
+  let circleRes: CircleApiResponse
+  try {
+    circleRes = await safeFetchJson<CircleApiResponse>(`/api/circles/${circleId}`)
+  } catch (e) {
+    notFound()
+  }
+  if (!circleRes || !("ok" in circleRes) || !circleRes.ok) notFound()
 
-  const [circle, setCircle] = useState<Circle | null>(null)
-  const [feed, setFeed] = useState<FeedItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const circle = circleRes.circle
+  const counts = circleRes.counts
 
-  const isUuid = useMemo(
-    () =>
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-        circleId
-      ),
-    [circleId]
-  )
+  // ✅ (2) circle feed: 기존 /api/circles/feed에서 circleId만 필터링
+  //     (API가 아직 circleId 필터를 지원하지 않아도, 최소로 동작하게 서버에서 필터링)
+  let feedRes: FeedApiResponse
+  try {
+    feedRes = await safeFetchJson<FeedApiResponse>(`/api/circles/feed?limit=50`)
+  } catch (e) {
+    feedRes = { ok: true, feed: [], items: [], nextCursor: null }
+  }
 
-  useEffect(() => {
-    let cancelled = false
-
-    async function run() {
-      if (!circleId) {
-        setError("Missing circle id")
-        setLoading(false)
-        return
-      }
-      if (!isUuid) {
-        setError(`Invalid circle id (uuid expected): ${circleId}`)
-        setLoading(false)
-        return
-      }
-
-      setLoading(true)
-      setError(null)
-
-      try {
-        // 1) circle meta: 있으면 표시(없어도 진행)
-        const cRes = await fetch(`/api/circles/${circleId}`, {
-          cache: "no-store",
-          credentials: "include",
-        })
-        const cData = await safeReadJson<ApiCircleResponse>(cRes)
-        if (!cancelled && cRes.ok && (cData as any)?.ok) {
-          setCircle((cData as any).circle)
-        }
-
-        // 2) feed: ✅ { ok:true, items:[...] } 로 받음
-        const fRes = await fetch(`/api/circles/${circleId}/feed?limit=20`, {
-          cache: "no-store",
-          credentials: "include",
-        })
-        const fData = await safeReadJson<ApiFeedResponse>(fRes)
-
-        if (cancelled) return
-
-        if (!fRes.ok || !(fData as any)?.ok) {
-          setError((fData as any)?.error ?? `Failed to load feed (HTTP ${fRes.status})`)
-          setFeed([])
-          setLoading(false)
-          return
-        }
-
-        const items: ApiFeedItemRaw[] = (fData as any).items ?? []
-        const mapped: FeedItem[] = items.map((it) => ({
-          id: it.id,
-          emailId: it.emailId,
-          sharedAt: it.sharedAt,
-          sharedBy: it.sharedBy ?? null,
-
-          subject: it.email?.subject ?? null,
-          fromAddress: it.email?.fromAddress ?? null,
-          receivedAt: it.email?.receivedAt ?? null,
-
-          // (옵션) 아직 백엔드에서 count/activity 안 내려주면 0/기본값 처리
-          highlightCount: 0,
-          commentCount: 0,
-          latestActivity: null,
-        }))
-
-        setFeed(mapped)
-        setLoading(false)
-      } catch (e: any) {
-        if (cancelled) return
-        setError(e?.message ?? "Failed to load circle")
-        setFeed([])
-        setLoading(false)
-      }
-    }
-
-    run()
-    return () => {
-      cancelled = true
-    }
-  }, [circleId, isUuid])
+  const flatFeed: FeedItem[] = Array.isArray((feedRes as any).feed) ? (feedRes as any).feed : []
+  const filtered = flatFeed.filter((x) => x.circleId === circleId)
 
   return (
-    <div className="flex h-full flex-col bg-background">
-      <header className="sticky top-0 z-10 border-b border-border bg-card/80 px-4 py-3 backdrop-blur-sm">
-        <div className="flex items-center gap-3">
-          <Link
-            href="/circles"
-            className="flex h-10 w-10 items-center justify-center rounded-full transition-colors hover:bg-secondary"
-          >
-            <ChevronLeft className="h-5 w-5 text-muted-foreground" />
-          </Link>
+    <div className="mx-auto max-w-2xl px-4 py-6">
+      {/* Header */}
+      <div className="mb-6 flex items-center gap-3">
+        <Link
+          href="/circles"
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-secondary transition-colors hover:bg-secondary/80"
+        >
+          <ArrowLeft className="h-5 w-5 text-secondary-foreground" />
+        </Link>
 
-          <div className="flex-1 min-w-0">
-            <h1 className="font-semibold text-foreground truncate">{circle?.name ?? "Circle"}</h1>
-            {/* ✅ description 컬럼 없음: 고정 문구로 */}
-            <p className="text-xs text-muted-foreground truncate">What your group is reading</p>
-          </div>
+        <div className="min-w-0">
+          <h1 className="truncate text-2xl font-semibold text-foreground">{circle?.name ?? "Circle"}</h1>
+          <p className="text-sm text-muted-foreground">Circle detail</p>
         </div>
-
-        <p className="mt-2 text-xs text-muted-foreground pl-[52px]">
-          {feed.length} shared newsletters
-        </p>
-      </header>
-
-      <div className="flex-1 overflow-y-auto px-4 py-4">
-        {loading ? (
-          <div className="py-6 text-sm text-muted-foreground">Loading…</div>
-        ) : error ? (
-          <div className="rounded-2xl border border-border bg-card p-4">
-            <div className="text-sm font-semibold text-foreground">Failed to load</div>
-            <div className="mt-1 text-sm text-muted-foreground">{error}</div>
-          </div>
-        ) : feed.length === 0 ? (
-          <div className="rounded-2xl border border-border bg-card p-4 text-sm text-muted-foreground">
-            No shared newsletters yet.
-          </div>
-        ) : (
-          <div className="flex flex-col gap-4">
-            {feed.map((it) => (
-              <SharedNewsletterCard key={it.id} item={it} />
-            ))}
-          </div>
-        )}
-
-        <div className="h-24" />
       </div>
+
+      {/* Stats */}
+      <ShineBorder
+        className="mb-6 shadow-sm ring-1 ring-border"
+        borderRadius={16}
+        color={["#A07CFE", "#FE8FB5", "#FFBE7B"]}
+        duration={10}
+      >
+        <div className="p-5">
+          <div className="flex flex-wrap gap-2">
+            <CircleStat icon={<Users className="h-4 w-4" />} label="Members" value={counts.members} />
+            <CircleStat icon={<Hash className="h-4 w-4" />} label="Shares" value={counts.shares} />
+          </div>
+
+          {circle?.description ? (
+            <p className="mt-3 text-sm text-muted-foreground">{circle.description}</p>
+          ) : (
+            <p className="mt-3 text-sm text-muted-foreground">
+              Share newsletters to this circle and discuss together.
+            </p>
+          )}
+        </div>
+      </ShineBorder>
+
+      {/* Feed */}
+      <div className="mb-3 flex items-end justify-between">
+        <div>
+          <h2 className="text-sm font-medium uppercase tracking-wide text-muted-foreground">Shared emails</h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            Showing latest shares (loaded). Infinite scroll will be enabled when API supports circle cursor.
+          </p>
+        </div>
+        <Button variant="secondary" className="rounded-xl">
+          Invite
+        </Button>
+      </div>
+
+      {filtered.length ? (
+        <div className="space-y-3">
+          {filtered.map((it) => (
+            <ShareRow
+              key={it.id}
+              emailId={it.emailId}
+              subject={it.subject ?? "(no subject)"}
+              fromAddress={it.fromAddress}
+              sharedAt={it.sharedAt}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-2xl bg-card p-5 ring-1 ring-border text-sm text-muted-foreground">
+          No shares yet. Go to an email and “Share to circle”.
+        </div>
+      )}
     </div>
   )
 }
