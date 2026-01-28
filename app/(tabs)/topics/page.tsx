@@ -7,10 +7,11 @@ import { emailDetailHref } from "@/lib/email-href"
 import { cn } from "@/lib/utils"
 import { MessageCircle, Megaphone, Loader2 } from "lucide-react"
 
-// --- API Types (✅ 현재 /api/circles/feed 응답에 맞춤) ---
+// --- API Types (✅ /api/circles/feed: items + feed 둘 다 대응) ---
 type FeedItem = {
   id: string
   circleId: string
+  circleName?: string | null
   emailId: string
   sharedAt: string
   sharedBy: string | null
@@ -23,7 +24,7 @@ type FeedItem = {
 }
 
 type ApiFeedResponse =
-  | { ok: true; feed: FeedItem[] }
+  | { ok: true; items?: any[]; feed?: FeedItem[]; nextCursor?: string | null }
   | { ok: false; error?: string }
 
 // --- Helpers ---
@@ -56,6 +57,28 @@ function formatTimeRelative(iso: string) {
   return date.toLocaleDateString()
 }
 
+function inferTopic(input: { subject?: string | null; from?: string | null }) {
+  const s = `${input.subject ?? ""} ${input.from ?? ""}`.toLowerCase()
+
+  const rules: Array<{ topic: string; keywords: string[] }> = [
+    {
+      topic: "AI",
+      keywords: ["ai", "gpt", "openai", "anthropic", "claude", "gemini", "deepmind", "nvidia", "llm", "agent"],
+    },
+    {
+      topic: "Markets",
+      keywords: ["market", "stocks", "etf", "earnings", "yield", "inflation", "fed", "rates", "crypto", "bitcoin", "nasdaq", "s&p"],
+    },
+    { topic: "Korea", keywords: ["kospi", "kosdaq", "krx", "seoul", "won", "samsung", "sk hynix", "korea"] },
+    { topic: "Startups", keywords: ["startup", "funding", "seed", "series a", "vc", "pitch", "y combinator", "yc"] },
+    { topic: "Design", keywords: ["design", "figma", "ux", "ui", "dribbble", "lottie", "accessibility", "wcag"] },
+    { topic: "Product", keywords: ["product", "pmf", "retention", "growth", "pricing", "onboarding"] },
+  ]
+
+  const hit = rules.find((r) => r.keywords.some((k) => s.includes(k)))
+  return hit?.topic ?? "Circles"
+}
+
 // --- View Types ---
 type TopicFeedItem = {
   id: string
@@ -76,14 +99,30 @@ function TopicChip({ topic }: { topic: string }) {
   )
 }
 
-function FeedCardComponent({ item, onOpenEmail }: { item: TopicFeedItem; onOpenEmail: () => void }) {
+function FeedCardComponent({
+  item,
+  onOpenEmail,
+  onOpenCircle,
+}: {
+  item: TopicFeedItem
+  onOpenEmail: () => void
+  onOpenCircle: () => void
+}) {
   return (
     <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md">
       <div className="flex items-start justify-between gap-2 mb-3">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <TopicChip topic={item.topic} />
-            <span className="text-xs text-muted-foreground">in {item.circleName}</span>
+
+            <button
+              type="button"
+              onClick={onOpenCircle}
+              className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+            >
+              in {item.circleName}
+            </button>
+
             <span className="text-xs text-muted-foreground">• {formatTimeRelative(item.sharedAt)}</span>
           </div>
 
@@ -128,8 +167,6 @@ export default function TopicsPage() {
   const [items, setItems] = useState<TopicFeedItem[]>([])
   const [error, setError] = useState<string | null>(null)
 
-  // ✅ 현재 API는 cursor paging을 안 주므로, infinite scroll은 "다음 단계"로.
-  // 일단 UI를 살리기 위해 sentinel은 남겨두되 nextCursor는 항상 null로 둠.
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
@@ -138,59 +175,58 @@ export default function TopicsPage() {
     const qs = new URLSearchParams()
     qs.set("limit", "20")
     if (cursor) qs.set("cursor", cursor)
-  
+
     const res = await fetch(`/api/circles/feed?${qs.toString()}`, {
       cache: "no-store",
       credentials: "include",
     })
-  
-    const data: any = await safeReadJson<any>(res)
-    if (!res.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${res.status}`)
-  
-    // ✅ items 우선, 없으면 feed로 fallback
-    const rows = Array.isArray(data.items) ? data.items : []
-    const feed = Array.isArray(data.feed) ? data.feed : []
-  
+
+    const data = await safeReadJson<ApiFeedResponse>(res)
+    if (!res.ok || !data?.ok) throw new Error((data as any)?.error ?? `HTTP ${res.status}`)
+
+    const rows = Array.isArray((data as any).items) ? (data as any).items : []
+    const feed = Array.isArray((data as any).feed) ? (data as any).feed : []
+
     const mapped: TopicFeedItem[] =
       rows.length > 0
         ? rows.map((row: any) => {
             const subject = row.email?.subject ?? "(no subject)"
-            const senderName = extractNameFromEmail(row.email?.from_address ?? "Unknown")
+            const from = row.email?.from_address ?? "Unknown"
             return {
               id: row.id,
               emailId: row.email_id,
               circleId: row.circle_id,
               circleName: row.circle_name ?? "Circle",
-              topic: "Today in your circles",
+              topic: inferTopic({ subject, from }),
               newsletterTitle: subject,
-              senderName,
+              senderName: extractNameFromEmail(from),
               sharedAt: row.created_at,
             }
           })
         : feed.map((row: any) => {
             const subject = row.subject ?? "(no subject)"
-            const senderName = extractNameFromEmail(row.fromAddress ?? "Unknown")
+            const from = row.fromAddress ?? "Unknown"
             return {
               id: row.id,
               emailId: row.emailId,
               circleId: row.circleId,
               circleName: row.circleName ?? "Circle",
-              topic: "Today in your circles",
+              topic: inferTopic({ subject, from }),
               newsletterTitle: subject,
-              senderName,
+              senderName: extractNameFromEmail(from),
               sharedAt: row.sharedAt,
             }
           })
-  
-    setNextCursor(data.nextCursor ?? null)
-  
+
+    setNextCursor((data as any).nextCursor ?? null)
+
     setItems((prev) => {
       if (mode === "replace") return mapped
       const seen = new Set(prev.map((x) => x.id))
       const appended = mapped.filter((x) => !seen.has(x.id))
       return [...prev, ...appended]
     })
-  }  
+  }
 
   // initial load
   useEffect(() => {
@@ -214,27 +250,30 @@ export default function TopicsPage() {
     }
   }, [])
 
-  // infinite scroll observer (✅ 당장은 비활성; nextCursor가 없으니 동작 안 함)
+  // infinite scroll observer
   useEffect(() => {
     if (activeTab !== "feed") return
     if (!sentinelRef.current) return
-    if (!nextCursor) return // ✅ 항상 null
+    if (!nextCursor) return
+    if (loadingMore) return
 
     const el = sentinelRef.current
-    const obs = new IntersectionObserver(async (entries) => {
-      const first = entries[0]
-      if (!first?.isIntersecting) return
-      if (loadingMore) return
+    const obs = new IntersectionObserver(
+      async (entries) => {
+        const first = entries[0]
+        if (!first?.isIntersecting) return
 
-      try {
-        setLoadingMore(true)
-        // await fetchPage(nextCursor, "append") // nextCursor 지원 시 복구
-      } catch (e) {
-        console.error(e)
-      } finally {
-        setLoadingMore(false)
-      }
-    })
+        try {
+          setLoadingMore(true)
+          await fetchPage(nextCursor, "append")
+        } catch (e) {
+          console.error(e)
+        } finally {
+          setLoadingMore(false)
+        }
+      },
+      { root: null, rootMargin: "400px 0px", threshold: 0 }
+    )
 
     obs.observe(el)
     return () => obs.disconnect()
@@ -246,10 +285,19 @@ export default function TopicsPage() {
     router.push(href)
   }
 
+  const handleOpenCircle = (circleId: string) => {
+    router.push(`/circles/${circleId}`)
+  }
+
   const cards = useMemo(
     () =>
       items.map((item) => (
-        <FeedCardComponent key={item.id} item={item} onOpenEmail={() => handleOpenEmail(item.emailId)} />
+        <FeedCardComponent
+          key={item.id}
+          item={item}
+          onOpenEmail={() => handleOpenEmail(item.emailId)}
+          onOpenCircle={() => handleOpenCircle(item.circleId)}
+        />
       )),
     [items]
   )
