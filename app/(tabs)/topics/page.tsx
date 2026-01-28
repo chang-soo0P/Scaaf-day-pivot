@@ -5,9 +5,9 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { emailDetailHref } from "@/lib/email-href"
 import { cn } from "@/lib/utils"
-import { MessageCircle, Megaphone, Loader2 } from "lucide-react"
+import { MessageCircle, Megaphone, Loader2, Users, Hash } from "lucide-react"
 
-// --- API Types (✅ /api/circles/feed: items + feed 둘 다 대응) ---
+// --- API Types (items + feed 둘 다 대응) ---
 type FeedItem = {
   id: string
   circleId: string
@@ -21,6 +21,10 @@ type FeedItem = {
   highlightCount?: number
   commentCount?: number
   latestActivity?: string | null
+
+  // (옵션) 백엔드가 내려주면 사용
+  circleMemberCount?: number | null
+  circleShareCount?: number | null
 }
 
 type ApiFeedResponse =
@@ -67,7 +71,20 @@ function inferTopic(input: { subject?: string | null; from?: string | null }) {
     },
     {
       topic: "Markets",
-      keywords: ["market", "stocks", "etf", "earnings", "yield", "inflation", "fed", "rates", "crypto", "bitcoin", "nasdaq", "s&p"],
+      keywords: [
+        "market",
+        "stocks",
+        "etf",
+        "earnings",
+        "yield",
+        "inflation",
+        "fed",
+        "rates",
+        "crypto",
+        "bitcoin",
+        "nasdaq",
+        "s&p",
+      ],
     },
     { topic: "Korea", keywords: ["kospi", "kosdaq", "krx", "seoul", "won", "samsung", "sk hynix", "korea"] },
     { topic: "Startups", keywords: ["startup", "funding", "seed", "series a", "vc", "pitch", "y combinator", "yc"] },
@@ -89,12 +106,53 @@ type TopicFeedItem = {
   newsletterTitle: string
   senderName: string
   sharedAt: string
+
+  // (옵션) 백엔드가 내려주면 사용
+  circleMemberCount?: number | null
+  circleShareCount?: number | null
 }
 
-function TopicChip({ topic }: { topic: string }) {
+function TopicChip({
+  topic,
+  active,
+  onClick,
+}: {
+  topic: string
+  active?: boolean
+  onClick?: () => void
+}) {
   return (
-    <span className="inline-block rounded-full bg-secondary px-2.5 py-0.5 text-xs font-medium text-secondary-foreground">
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors",
+        active
+          ? "bg-primary text-primary-foreground"
+          : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+      )}
+    >
       {topic}
+    </button>
+  )
+}
+
+function StatPill({
+  icon,
+  children,
+  title,
+}: {
+  icon: React.ReactNode
+  children: React.ReactNode
+  title?: string
+}) {
+  return (
+    <span
+      title={title}
+      className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-[11px] text-secondary-foreground"
+    >
+      {icon}
+      {children}
     </span>
   )
 }
@@ -103,17 +161,29 @@ function FeedCardComponent({
   item,
   onOpenEmail,
   onOpenCircle,
+  onClickTopic,
+  isTopicActive,
+  circleShareCount,
+  circleMemberCount,
 }: {
   item: TopicFeedItem
   onOpenEmail: () => void
   onOpenCircle: () => void
+  onClickTopic: (topic: string) => void
+  isTopicActive: boolean
+  circleShareCount: number
+  circleMemberCount: number | null
 }) {
   return (
     <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md">
       <div className="flex items-start justify-between gap-2 mb-3">
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <TopicChip topic={item.topic} />
+          <div className="flex flex-wrap items-center gap-2">
+            <TopicChip
+              topic={item.topic}
+              active={isTopicActive}
+              onClick={() => onClickTopic(item.topic)}
+            />
 
             <button
               type="button"
@@ -124,6 +194,21 @@ function FeedCardComponent({
             </button>
 
             <span className="text-xs text-muted-foreground">• {formatTimeRelative(item.sharedAt)}</span>
+
+            <div className="ml-auto flex items-center gap-1">
+              {circleMemberCount !== null ? (
+                <StatPill
+                  title="Members"
+                  icon={<Users className="h-3 w-3" />}
+                >
+                  {circleMemberCount}
+                </StatPill>
+              ) : null}
+
+              <StatPill title="Shares in this feed (loaded)" icon={<Hash className="h-3 w-3" />}>
+                {circleShareCount}
+              </StatPill>
+            </div>
           </div>
 
           <h3 className="mt-2 text-base font-semibold leading-snug text-foreground line-clamp-2">
@@ -171,6 +256,9 @@ export default function TopicsPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
 
+  // ✅ Topic filter state
+  const [activeTopic, setActiveTopic] = useState<string | null>(null)
+
   const fetchPage = async (cursor: string | null, mode: "replace" | "append") => {
     const qs = new URLSearchParams()
     qs.set("limit", "20")
@@ -192,29 +280,35 @@ export default function TopicsPage() {
         ? rows.map((row: any) => {
             const subject = row.email?.subject ?? "(no subject)"
             const from = row.email?.from_address ?? "Unknown"
+            const topic = inferTopic({ subject, from })
             return {
               id: row.id,
               emailId: row.email_id,
               circleId: row.circle_id,
               circleName: row.circle_name ?? "Circle",
-              topic: inferTopic({ subject, from }),
+              topic,
               newsletterTitle: subject,
               senderName: extractNameFromEmail(from),
               sharedAt: row.created_at,
+              circleMemberCount: row.circle_member_count ?? null,
+              circleShareCount: row.circle_share_count ?? null,
             }
           })
         : feed.map((row: any) => {
             const subject = row.subject ?? "(no subject)"
             const from = row.fromAddress ?? "Unknown"
+            const topic = inferTopic({ subject, from })
             return {
               id: row.id,
               emailId: row.emailId,
               circleId: row.circleId,
               circleName: row.circleName ?? "Circle",
-              topic: inferTopic({ subject, from }),
+              topic,
               newsletterTitle: subject,
               senderName: extractNameFromEmail(from),
               sharedAt: row.sharedAt,
+              circleMemberCount: row.circleMemberCount ?? null,
+              circleShareCount: row.circleShareCount ?? null,
             }
           })
 
@@ -289,18 +383,75 @@ export default function TopicsPage() {
     router.push(`/circles/${circleId}`)
   }
 
-  const cards = useMemo(
-    () =>
-      items.map((item) => (
-        <FeedCardComponent
-          key={item.id}
-          item={item}
-          onOpenEmail={() => handleOpenEmail(item.emailId)}
-          onOpenCircle={() => handleOpenCircle(item.circleId)}
-        />
-      )),
-    [items]
-  )
+  const handleToggleTopic = (topic: string) => {
+    setActiveTopic((prev) => (prev === topic ? null : topic))
+  }
+
+  // ✅ circle별 share count(현재 로드된 items 기준) 계산
+  const shareCountByCircleId = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const it of items) {
+      m.set(it.circleId, (m.get(it.circleId) ?? 0) + 1)
+    }
+    return m
+  }, [items])
+
+  // ✅ topic별 카운트 + 정렬된 topic 목록
+  const topicCounts = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const it of items) m.set(it.topic, (m.get(it.topic) ?? 0) + 1)
+    const arr = Array.from(m.entries()).sort((a, b) => b[1] - a[1])
+    return arr
+  }, [items])
+
+  // ✅ 필터 적용된 리스트
+  const visibleItems = useMemo(() => {
+    if (!activeTopic) return items
+    return items.filter((it) => it.topic === activeTopic)
+  }, [items, activeTopic])
+
+  // ✅ topic별 그룹핑 (섹션 렌더용)
+  const groupedByTopic = useMemo(() => {
+    const groups = new Map<string, TopicFeedItem[]>()
+    for (const it of visibleItems) {
+      const arr = groups.get(it.topic) ?? []
+      arr.push(it)
+      groups.set(it.topic, arr)
+    }
+    // 각 그룹 내 최신순
+    for (const [k, arr] of groups.entries()) {
+      arr.sort((a, b) => new Date(b.sharedAt).getTime() - new Date(a.sharedAt).getTime())
+      groups.set(k, arr)
+    }
+    // 섹션 순서: topicCounts(빈도순) 우선, 그 외 알파벳
+    const orderedTopics = [
+      ...topicCounts.map(([t]) => t).filter((t) => groups.has(t)),
+      ...Array.from(groups.keys()).filter((t) => !topicCounts.some(([x]) => x === t)).sort(),
+    ]
+    return { groups, orderedTopics }
+  }, [visibleItems, topicCounts])
+
+  // ✅ 카드 렌더 helper
+  const renderCards = (list: TopicFeedItem[]) => {
+    const cards = list.map((item) => (
+      <FeedCardComponent
+        key={item.id}
+        item={item}
+        onOpenEmail={() => handleOpenEmail(item.emailId)}
+        onOpenCircle={() => handleOpenCircle(item.circleId)}
+        onClickTopic={handleToggleTopic}
+        isTopicActive={activeTopic === item.topic}
+        circleShareCount={shareCountByCircleId.get(item.circleId) ?? 0}
+        circleMemberCount={item.circleMemberCount ?? null}
+      />
+    ))
+
+    return layout === "list" ? (
+      <div className="space-y-4">{cards}</div>
+    ) : (
+      <MasonryGrid>{cards}</MasonryGrid>
+    )
+  }
 
   return (
     <div className="flex min-h-full flex-col">
@@ -327,6 +478,31 @@ export default function TopicsPage() {
             Ad Board
           </button>
         </div>
+
+        {/* ✅ Topic Filter Bar */}
+        {activeTab === "feed" && (
+          <div className="mx-4 mt-3 flex items-center gap-2 overflow-x-auto pb-1">
+            <TopicChip topic="All" active={!activeTopic} onClick={() => setActiveTopic(null)} />
+            {topicCounts.map(([t, count]) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => handleToggleTopic(t)}
+                className={cn(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium transition-colors whitespace-nowrap",
+                  activeTopic === t
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                )}
+              >
+                {t}
+                <span className={cn("text-[11px]", activeTopic === t ? "text-primary-foreground/80" : "text-secondary-foreground/70")}>
+                  {count}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="flex-1 px-4 pb-24">
@@ -338,10 +514,45 @@ export default function TopicsPage() {
           <div className="text-sm text-destructive">{error}</div>
         ) : items.length === 0 ? (
           <div className="text-sm text-muted-foreground">No feed yet. Share a newsletter to a circle.</div>
-        ) : layout === "list" ? (
-          <div className="space-y-4">{cards}</div>
         ) : (
-          <MasonryGrid>{cards}</MasonryGrid>
+          <div className="space-y-8">
+            {/* ✅ Topic Sections (그룹핑) */}
+            {groupedByTopic.orderedTopics.map((topic) => {
+              const list = groupedByTopic.groups.get(topic) ?? []
+              if (list.length === 0) return null
+
+              return (
+                <section key={topic} className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-sm font-semibold text-foreground">{topic}</h2>
+                      <span className="text-xs text-muted-foreground">{list.length}</span>
+                    </div>
+
+                    {activeTopic ? (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTopic(null)}
+                        className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+                      >
+                        Clear filter
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setActiveTopic(topic)}
+                        className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+                      >
+                        View only
+                      </button>
+                    )}
+                  </div>
+
+                  {renderCards(list)}
+                </section>
+              )
+            })}
+          </div>
         )}
 
         {/* infinite scroll sentinel */}
