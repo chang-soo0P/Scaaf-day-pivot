@@ -41,6 +41,35 @@ function decodeCursor(raw: string): CursorPayload | null {
   }
 }
 
+async function countByCircleIdExact(
+  admin: ReturnType<typeof createSupabaseAdminClient>,
+  table: "circle_members" | "circle_emails",
+  circleIds: string[]
+) {
+  const map = new Map<string, number>()
+
+  // Supabase/PostgREST에서 group-by count가 애매해서,
+  // ✅ "head:true + count:exact"로 circleId별 count만 가져옴 (데이터 row는 내려받지 않음)
+  await Promise.all(
+    circleIds.map(async (circleId) => {
+      const { count, error } = await admin
+        .from(table)
+        .select("id", { count: "exact", head: true })
+        .eq("circle_id", circleId)
+
+      if (error) {
+        // 카운트 실패는 전체 실패로 만들지 말고 0 처리
+        map.set(circleId, 0)
+        return
+      }
+
+      map.set(circleId, Number(count ?? 0))
+    })
+  )
+
+  return map
+}
+
 export async function GET(req: NextRequest) {
   try {
     const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") ?? 20), 100)
@@ -83,9 +112,8 @@ export async function GET(req: NextRequest) {
       .order("id", { ascending: false })
       .limit(limit + 1)
 
-    // cursor: (created_at, id) 기준으로 "이전 것들"만 가져오기
+    // cursor: (created_at, id) 기준으로 이전 것들만
     if (cursor) {
-      // created_at < cursor.created_at OR (created_at = cursor.created_at AND id < cursor.id)
       q = q.or(
         `created_at.lt.${cursor.created_at},and(created_at.eq.${cursor.created_at},id.lt.${cursor.id})`
       )
@@ -100,7 +128,10 @@ export async function GET(req: NextRequest) {
 
     const nextCursor =
       hasMore && shares.length
-        ? encodeCursor({ created_at: shares[shares.length - 1].created_at, id: shares[shares.length - 1].id })
+        ? encodeCursor({
+            created_at: shares[shares.length - 1].created_at,
+            id: shares[shares.length - 1].id,
+          })
         : null
 
     if (shares.length === 0) {
@@ -112,6 +143,7 @@ export async function GET(req: NextRequest) {
 
     // 3) circleName 붙이기
     const circleIdsOnPage = Array.from(new Set(shares.map((s: any) => s.circle_id).filter(Boolean)))
+
     const { data: circles, error: circlesErr } = await admin
       .from("circles")
       .select("id, name")
@@ -119,6 +151,12 @@ export async function GET(req: NextRequest) {
 
     if (circlesErr) return NextResponse.json({ ok: false, error: circlesErr.message }, { status: 500 })
     const circleNameById = new Map((circles ?? []).map((c: any) => [c.id, c.name]))
+
+    // ✅ 3-1) circle_member_count / circle_share_count (실제 DB 기준)
+    const [memberCountByCircleId, shareCountByCircleId] = await Promise.all([
+      countByCircleIdExact(admin, "circle_members", circleIdsOnPage),
+      countByCircleIdExact(admin, "circle_emails", circleIdsOnPage),
+    ])
 
     // 4) inbox_emails 메타 붙이기
     const emailIds = Array.from(new Set(shares.map((s: any) => s.email_id).filter(Boolean)))
@@ -130,13 +168,16 @@ export async function GET(req: NextRequest) {
     if (emailErr) return NextResponse.json({ ok: false, error: emailErr.message }, { status: 500 })
     const emailById = new Map((emails ?? []).map((e: any) => [e.id, e]))
 
-    // ✅ (A) 프론트가 원래 기대하던 구조: items + email + circle_name
+    // ✅ (A) 프론트(원래 기대) 구조: items + email + circle_name + counts
     const items = shares.map((s: any) => {
       const email = emailById.get(s.email_id) ?? null
+      const circleId = s.circle_id
       return {
         id: s.id,
-        circle_id: s.circle_id,
-        circle_name: circleNameById.get(s.circle_id) ?? null,
+        circle_id: circleId,
+        circle_name: circleNameById.get(circleId) ?? null,
+        circle_member_count: memberCountByCircleId.get(circleId) ?? 0,
+        circle_share_count: shareCountByCircleId.get(circleId) ?? 0,
         email_id: s.email_id,
         shared_by: s.shared_by ?? null,
         created_at: s.created_at,
@@ -144,13 +185,16 @@ export async function GET(req: NextRequest) {
       }
     })
 
-    // ✅ (B) 네가 현재 확인했던 구조: feed (flat)
+    // ✅ (B) flat 구조: feed + counts
     const feed = shares.map((s: any) => {
       const e = emailById.get(s.email_id)
+      const circleId = s.circle_id
       return {
         id: s.id,
-        circleId: s.circle_id,
-        circleName: circleNameById.get(s.circle_id) ?? null,
+        circleId,
+        circleName: circleNameById.get(circleId) ?? null,
+        circleMemberCount: memberCountByCircleId.get(circleId) ?? 0,
+        circleShareCount: shareCountByCircleId.get(circleId) ?? 0,
         emailId: s.email_id,
         sharedAt: s.created_at,
         sharedBy: s.shared_by ?? null,
