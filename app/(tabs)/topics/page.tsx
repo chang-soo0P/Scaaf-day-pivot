@@ -22,6 +22,9 @@ type FeedItem = {
   commentCount?: number
   latestActivity?: string | null
 
+  // ✅ sharedByProfile (server에서 내려옴)
+  sharedByProfile?: { id: string; name: string; avatarUrl: string | null } | null
+
   // 백엔드가 내려주는 DB 기준 카운트
   circleMemberCount?: number | null
   circleShareCount?: number | null
@@ -65,14 +68,8 @@ function inferTopic(input: { subject?: string | null; from?: string | null }) {
   const s = `${input.subject ?? ""} ${input.from ?? ""}`.toLowerCase()
 
   const rules: Array<{ topic: string; keywords: string[] }> = [
-    {
-      topic: "AI",
-      keywords: ["ai", "gpt", "openai", "anthropic", "claude", "gemini", "deepmind", "nvidia", "llm", "agent"],
-    },
-    {
-      topic: "Markets",
-      keywords: ["market", "stocks", "etf", "earnings", "yield", "inflation", "fed", "rates", "crypto", "bitcoin", "nasdaq", "s&p"],
-    },
+    { topic: "AI", keywords: ["ai", "gpt", "openai", "anthropic", "claude", "gemini", "deepmind", "nvidia", "llm", "agent"] },
+    { topic: "Markets", keywords: ["market", "stocks", "etf", "earnings", "yield", "inflation", "fed", "rates", "crypto", "bitcoin", "nasdaq", "s&p"] },
     { topic: "Korea", keywords: ["kospi", "kosdaq", "krx", "seoul", "won", "samsung", "sk hynix", "korea"] },
     { topic: "Startups", keywords: ["startup", "funding", "seed", "series a", "vc", "pitch", "y combinator", "yc"] },
     { topic: "Design", keywords: ["design", "figma", "ux", "ui", "dribbble", "lottie", "accessibility", "wcag"] },
@@ -81,6 +78,29 @@ function inferTopic(input: { subject?: string | null; from?: string | null }) {
 
   const hit = rules.find((r) => r.keywords.some((k) => s.includes(k)))
   return hit?.topic ?? "Circles"
+}
+
+function initialsFromName(name: string) {
+  const n = (name ?? "").trim()
+  if (!n) return "?"
+  // 한글/영문 모두 대응: 공백 기준 첫 글자 1~2개
+  const parts = n.split(/\s+/).filter(Boolean)
+  const first = parts[0]?.[0] ?? n[0]
+  const second = parts.length > 1 ? parts[1]?.[0] : n.length > 1 ? n[1] : ""
+  const out = `${first}${second}`.toUpperCase()
+  return out.slice(0, 2)
+}
+
+function AvatarInitial({ name }: { name: string }) {
+  return (
+    <div
+      className="h-5 w-5 rounded-full bg-secondary text-secondary-foreground flex items-center justify-center text-[10px] font-semibold"
+      aria-label={name}
+      title={name}
+    >
+      {initialsFromName(name)}
+    </div>
+  )
 }
 
 // --- View Types ---
@@ -93,6 +113,9 @@ type TopicFeedItem = {
   newsletterTitle: string
   senderName: string
   sharedAt: string
+
+  // ✅ shared by UI
+  sharedByName: string
 
   // DB 기준 카운트
   circleMemberCount?: number | null
@@ -147,6 +170,7 @@ function FeedCardComponent({
     <div className="rounded-2xl bg-card p-4 shadow-sm ring-1 ring-border/80 transition-shadow hover:shadow-md">
       <div className="flex items-start justify-between gap-2 mb-3">
         <div className="min-w-0 flex-1">
+          {/* ✅ 상단 메타 라인 */}
           <div className="flex flex-wrap items-center gap-2">
             <TopicChip topic={item.topic} active={isTopicActive} onClick={() => onClickTopic(item.topic)} />
 
@@ -159,6 +183,12 @@ function FeedCardComponent({
             </button>
 
             <span className="text-xs text-muted-foreground">• {formatTimeRelative(item.sharedAt)}</span>
+
+            {/* ✅ B 스타일: 작은 이니셜 + shared by */}
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <AvatarInitial name={item.sharedByName} />
+              <span className="truncate">shared by {item.sharedByName}</span>
+            </span>
 
             <div className="ml-auto flex items-center gap-1">
               {circleMemberCount !== null ? (
@@ -236,9 +266,8 @@ export default function TopicsPage() {
     const data = await safeReadJson<ApiFeedResponse>(res)
     if (!res.ok || !(data as any)?.ok) throw new Error((data as any)?.error ?? `HTTP ${res.status}`)
 
-    // v2(feed) 기준 우선 사용, (구버전 items/feed)도 fallback
     const feed = Array.isArray((data as any).feed) ? ((data as any).feed as FeedItem[]) : []
-    const legacyItems = Array.isArray((data as any).items) ? (data as any).items : [] // (구형 대비)
+    const legacyItems = Array.isArray((data as any).items) ? (data as any).items : []
 
     const mapped: TopicFeedItem[] =
       feed.length > 0
@@ -246,6 +275,11 @@ export default function TopicsPage() {
             const subject = row.subject ?? "(no subject)"
             const from = row.fromAddress ?? "Unknown"
             const topic = inferTopic({ subject, from })
+
+            const sharedByName =
+              (row.sharedByProfile?.name && String(row.sharedByProfile.name)) ||
+              (row.sharedBy ? "Member" : "Member")
+
             return {
               id: row.id,
               emailId: row.emailId,
@@ -255,15 +289,19 @@ export default function TopicsPage() {
               newsletterTitle: subject,
               senderName: extractNameFromEmail(from),
               sharedAt: row.sharedAt,
+              sharedByName,
               circleMemberCount: row.circleMemberCount ?? null,
               circleShareCount: row.circleShareCount ?? null,
             }
           })
         : legacyItems.map((row: any) => {
-            // legacy shape: { id, circle_id, circle_name, email_id, created_at, email: { subject, from_address } }
             const subject = row.email?.subject ?? "(no subject)"
             const from = row.email?.from_address ?? "Unknown"
             const topic = inferTopic({ subject, from })
+
+            // legacy에는 sharedByProfile 없을 수 있음
+            const sharedByName = "Member"
+
             return {
               id: row.id,
               emailId: row.email_id,
@@ -273,6 +311,7 @@ export default function TopicsPage() {
               newsletterTitle: subject,
               senderName: extractNameFromEmail(from),
               sharedAt: row.created_at,
+              sharedByName,
               circleMemberCount: row.circle_member_count ?? null,
               circleShareCount: row.circle_share_count ?? null,
             }
