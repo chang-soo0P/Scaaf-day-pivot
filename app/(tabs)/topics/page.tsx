@@ -134,40 +134,63 @@ export default function TopicsPage() {
   const [loadingMore, setLoadingMore] = useState(false)
   const sentinelRef = useRef<HTMLDivElement | null>(null)
 
-  const fetchPage = async () => {
+  const fetchPage = async (cursor: string | null, mode: "replace" | "append") => {
     const qs = new URLSearchParams()
     qs.set("limit", "20")
-
+    if (cursor) qs.set("cursor", cursor)
+  
     const res = await fetch(`/api/circles/feed?${qs.toString()}`, {
       cache: "no-store",
       credentials: "include",
     })
-
-    const data = await safeReadJson<ApiFeedResponse>(res)
-    if (!res.ok) throw new Error((data as any)?.error ?? `HTTP ${res.status}`)
-    if (!data.ok) throw new Error(data.error ?? `HTTP ${res.status}`)
-
-    const mapped: TopicFeedItem[] = (data.feed ?? []).map((row) => {
-      const subject = row.subject ?? "(no subject)"
-      const senderName = extractNameFromEmail(row.fromAddress ?? "Unknown")
-
-      return {
-        id: row.id,
-        emailId: row.emailId,
-        circleId: row.circleId,
-        // ✅ circleName은 API에 없으니 일단 placeholder
-        // (원하면 circle_name을 API에서 조인해서 내려주거나, 여기서 별도 fetch로 보강 가능)
-        circleName: "Circle",
-        topic: "Today in your circles",
-        newsletterTitle: subject,
-        senderName,
-        sharedAt: row.sharedAt,
-      }
+  
+    const data: any = await safeReadJson<any>(res)
+    if (!res.ok || !data?.ok) throw new Error(data?.error ?? `HTTP ${res.status}`)
+  
+    // ✅ items 우선, 없으면 feed로 fallback
+    const rows = Array.isArray(data.items) ? data.items : []
+    const feed = Array.isArray(data.feed) ? data.feed : []
+  
+    const mapped: TopicFeedItem[] =
+      rows.length > 0
+        ? rows.map((row: any) => {
+            const subject = row.email?.subject ?? "(no subject)"
+            const senderName = extractNameFromEmail(row.email?.from_address ?? "Unknown")
+            return {
+              id: row.id,
+              emailId: row.email_id,
+              circleId: row.circle_id,
+              circleName: row.circle_name ?? "Circle",
+              topic: "Today in your circles",
+              newsletterTitle: subject,
+              senderName,
+              sharedAt: row.created_at,
+            }
+          })
+        : feed.map((row: any) => {
+            const subject = row.subject ?? "(no subject)"
+            const senderName = extractNameFromEmail(row.fromAddress ?? "Unknown")
+            return {
+              id: row.id,
+              emailId: row.emailId,
+              circleId: row.circleId,
+              circleName: row.circleName ?? "Circle",
+              topic: "Today in your circles",
+              newsletterTitle: subject,
+              senderName,
+              sharedAt: row.sharedAt,
+            }
+          })
+  
+    setNextCursor(data.nextCursor ?? null)
+  
+    setItems((prev) => {
+      if (mode === "replace") return mapped
+      const seen = new Set(prev.map((x) => x.id))
+      const appended = mapped.filter((x) => !seen.has(x.id))
+      return [...prev, ...appended]
     })
-
-    setItems(mapped)
-    setNextCursor(null) // ✅ 현재 API는 nextCursor 미지원
-  }
+  }  
 
   // initial load
   useEffect(() => {
@@ -176,7 +199,7 @@ export default function TopicsPage() {
       try {
         setLoading(true)
         setError(null)
-        await fetchPage()
+        await fetchPage(null, "replace")
         if (cancelled) return
         setLoading(false)
       } catch (e: any) {
