@@ -1,41 +1,112 @@
-// app/circles/join/page.tsx
-import { redirect } from "next/navigation"
-import { headers } from "next/headers"
+// app/(tabs)/circles/join/page.tsx
+"use client"
 
-export const runtime = "nodejs"
-export const dynamic = "force-dynamic"
+import { useEffect, useMemo, useState } from "react"
+import { useRouter, useSearchParams } from "next/navigation"
+import { Loader2, CheckCircle2, XCircle } from "lucide-react"
+import { Button } from "@/components/ui/button"
 
-async function getBaseUrl() {
-  const envUrl = process.env.NEXT_PUBLIC_APP_URL?.trim()
-  if (envUrl) return envUrl.replace(/\/+$/, "")
-  const h = await headers()
-  const proto = h.get("x-forwarded-proto") ?? "http"
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost:3000"
-  return `${proto}://${host}`
+type JoinResponse =
+  | { ok: true; circleId: string; circleName: string | null; alreadyMember: boolean }
+  | { ok: false; error: string }
+
+async function safeReadJson<T>(res: Response): Promise<T> {
+  const text = await res.text()
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    return { ok: false, error: text || `HTTP ${res.status}` } as unknown as T
+  }
 }
 
-export default async function JoinCirclePage({
-  searchParams,
-}: {
-  searchParams: Promise<{ code?: string }>
-}) {
-  const { code } = await searchParams
-  if (!code) redirect("/circles")
+export default function CircleJoinPage() {
+  const router = useRouter()
+  const sp = useSearchParams()
 
-  const baseUrl = await getBaseUrl()
+  const code = useMemo(() => (sp.get("code") ?? "").trim(), [sp])
 
-  // 서버에서 join API 호출 (쿠키는 브라우저 요청에 의해 자동 포함되어 들어오므로,
-  // 여기서 별도 포워딩 없이도 동작하는 경우가 많지만, 안전하게는 클라이언트 join을 추천)
-  // MVP: client 페이지를 만들기보단 server redirect로 심플 처리
-  const res = await fetch(`${baseUrl}/api/circles/join`, {
-    method: "POST",
-    cache: "no-store",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code }),
-  })
+  const [loading, setLoading] = useState(true)
+  const [data, setData] = useState<JoinResponse | null>(null)
 
-  const data = await res.json().catch(() => null)
-  if (!res.ok || !data?.ok) redirect("/circles")
+  useEffect(() => {
+    let cancelled = false
 
-  redirect(`/circles/${data.circleId}`)
+    ;(async () => {
+      try {
+        setLoading(true)
+        setData(null)
+
+        if (!code) {
+          setData({ ok: false, error: "Missing invite code" })
+          return
+        }
+
+        const res = await fetch("/api/circles/join", {
+          method: "POST",
+          cache: "no-store",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ code }),
+        })
+
+        const json = await safeReadJson<JoinResponse>(res)
+        if (!res.ok || !json.ok) {
+          setData({ ok: false, error: (json as any)?.error ?? `HTTP ${res.status}` })
+          return
+        }
+
+        setData(json)
+
+        // ✅ 자동 이동
+        if (!cancelled) {
+          router.replace(`/circles/${json.circleId}`)
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [code, router])
+
+  // UX: 자동 이동 전에 잠깐 보여주는 화면
+  return (
+    <div className="mx-auto max-w-md px-4 py-10">
+      <h1 className="text-xl font-semibold">Joining circle…</h1>
+      <p className="mt-1 text-sm text-muted-foreground">
+        We’re validating your invite and adding you to the circle.
+      </p>
+
+      <div className="mt-6 rounded-2xl bg-card p-5 ring-1 ring-border">
+        {loading ? (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Processing…
+          </div>
+        ) : data?.ok ? (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-sm">
+              <CheckCircle2 className="h-4 w-4" />
+              Joined {data.circleName ?? "circle"} {data.alreadyMember ? "(already a member)" : ""}
+            </div>
+            <Button className="w-full rounded-xl" onClick={() => router.push(`/circles/${data.circleId}`)}>
+              Go to circle
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 text-sm text-destructive">
+              <XCircle className="h-4 w-4" />
+              {data?.error ?? "Failed to join"}
+            </div>
+            <Button variant="secondary" className="w-full rounded-xl" onClick={() => router.push("/circles")}>
+              Back to circles
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
