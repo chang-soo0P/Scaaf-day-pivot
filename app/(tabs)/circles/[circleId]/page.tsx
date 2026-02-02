@@ -1,33 +1,45 @@
-import Link from "next/link"
+// app/(tabs)/circles/[circleId]/page.tsx
 import { notFound } from "next/navigation"
-import { ArrowLeft } from "lucide-react"
+import { headers } from "next/headers"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
-import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 import CircleFeedClient from "./_components/CircleFeedClient"
-import type { CircleFeedItem } from "@/types/circle-feed"
+import type { CircleFeedApiResponse } from "@/types/circle-feed"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
-type DbCircle = { id: string; name: string | null }
-type DbShare = {
-  id: string
-  circle_id: string
-  email_id: string
-  shared_by: string | null
-  created_at: string
+// ✅ Next 16: headers()가 Promise일 수 있으므로 async로 처리
+async function getBaseUrl() {
+  // 1) 운영/프리뷰에서 보통 들어있는 값들 우선
+  const envUrl =
+    process.env.NEXT_PUBLIC_SITE_URL ||
+    process.env.NEXT_PUBLIC_APP_URL ||
+    process.env.VERCEL_URL
+
+  if (envUrl) {
+    return envUrl.startsWith("http") ? envUrl : `https://${envUrl}`
+  }
+
+  // 2) 로컬/기타: 요청 헤더의 host로 조립 (✅ await 필요)
+  const h = await headers()
+  const host = h.get("x-forwarded-host") ?? h.get("host")
+  const proto = h.get("x-forwarded-proto") ?? "http"
+  if (!host) return "http://localhost:3000"
+  return `${proto}://${host}`
 }
-type DbEmail = {
-  id: string
-  subject: string | null
-  from_address: string | null
-  received_at: string | null
-}
-type DbUser = {
-  id: string
-  username: string | null
-  display_name: string | null
-  email_address: string | null
+
+async function fetchCircleFeed(circleId: string) {
+  const baseUrl = await getBaseUrl()
+  const url = `${baseUrl}/api/circles/${circleId}/feed?limit=20`
+
+  const res = await fetch(url, {
+    cache: "no-store",
+    headers: { "content-type": "application/json" },
+  })
+
+  const data = (await res.json()) as CircleFeedApiResponse
+  if (!res.ok || !data.ok) return { feed: [], nextCursor: null }
+  return { feed: data.feed ?? [], nextCursor: data.nextCursor ?? null }
 }
 
 export default async function CircleDetailPage({
@@ -37,19 +49,17 @@ export default async function CircleDetailPage({
 }) {
   const { circleId } = await params
 
-  // 1) 로그인 확인
   const supabase = await createSupabaseServerClient()
   const {
     data: { user },
   } = await supabase.auth.getUser()
+
   if (!user) notFound()
 
-  const admin = createSupabaseAdminClient()
-
-  // 2) 멤버십 확인
-  const { data: mem, error: memErr } = await admin
+  // ✅ 멤버십 체크 (circle_members.id 같은 컬럼 사용 금지)
+  const { data: membership, error: memErr } = await supabase
     .from("circle_members")
-    .select("id")
+    .select("circle_id")
     .eq("circle_id", circleId)
     .eq("user_id", user.id)
     .maybeSingle()
@@ -58,123 +68,31 @@ export default async function CircleDetailPage({
     console.error("[circles/[circleId]] membership error:", memErr)
     notFound()
   }
-  if (!mem) notFound()
+  if (!membership) notFound()
 
-  // 3) circle 정보
-  const { data: circle, error: circleErr } = await admin
+  // circle 기본 정보
+  const { data: circle, error: circleErr } = await supabase
     .from("circles")
-    .select("id, name")
+    .select("id,name")
     .eq("id", circleId)
-    .maybeSingle<DbCircle>()
+    .maybeSingle()
 
-  if (circleErr) {
+  if (circleErr || !circle) {
     console.error("[circles/[circleId]] circle error:", circleErr)
     notFound()
   }
-  if (!circle) notFound()
 
-  // 4) 최신 공유글 20개
-  const { data: sharesRaw, error: shareErr } = await admin
-    .from("circle_emails")
-    .select("id, circle_id, email_id, shared_by, created_at")
-    .eq("circle_id", circleId)
-    .order("created_at", { ascending: false })
-    .limit(20)
-
-  if (shareErr) {
-    console.error("[circles/[circleId]] share error:", shareErr)
-    notFound()
-  }
-
-  const shares = (sharesRaw ?? []) as DbShare[]
-  const nextCursor = shares.length === 20 ? shares[shares.length - 1]?.created_at ?? null : null
-
-  // 5) 이메일 메타
-  const emailIds = Array.from(new Set(shares.map((s) => s.email_id).filter(Boolean)))
-  let emailById = new Map<string, DbEmail>()
-  if (emailIds.length > 0) {
-    const { data: emailsRaw, error: emailErr } = await admin
-      .from("inbox_emails")
-      .select("id, subject, from_address, received_at")
-      .in("id", emailIds)
-
-    if (emailErr) {
-      console.error("[circles/[circleId]] email meta error:", emailErr)
-      notFound()
-    }
-
-    const emails = (emailsRaw ?? []) as DbEmail[]
-    emailById = new Map(emails.map((e) => [e.id, e]))
-  }
-
-  // 6) 공유자 프로필: public.users에서 name만 가져오기 (avatarUrl 없음)
-  const userIds = Array.from(new Set(shares.map((s) => s.shared_by).filter(Boolean))) as string[]
-  let userById = new Map<string, DbUser>()
-  if (userIds.length > 0) {
-    const { data: usersRaw, error: usersErr } = await admin
-      .from("users")
-      .select("id, username, display_name, email_address")
-      .in("id", userIds)
-
-    if (usersErr) {
-      console.error("[circles/[circleId]] users error:", usersErr)
-      // users 조회 실패해도 feed는 렌더 가능
-    } else {
-      const users = (usersRaw ?? []) as DbUser[]
-      userById = new Map(users.map((u) => [u.id, u]))
-    }
-  }
-
-  // 7) ✅ CircleFeedItem은 "공통 타입" 그대로 사용
-  //    sharedByProfile은 optional이 아니라 "필수 key"로 넣고, 값은 null 가능하게!
-  const initialFeed: CircleFeedItem[] = shares.map((s) => {
-    const e = emailById.get(s.email_id)
-    const u = s.shared_by ? userById.get(s.shared_by) : null
-
-    const name =
-      (u?.display_name && u.display_name.trim()) ||
-      (u?.username && u.username.trim()) ||
-      "Member"
-
-    return {
-      id: s.id,
-      circleId: s.circle_id,
-      emailId: s.email_id,
-      sharedAt: s.created_at,
-      sharedBy: s.shared_by ?? null,
-
-      subject: e?.subject ?? null,
-      fromAddress: e?.from_address ?? null,
-      receivedAt: e?.received_at ?? null,
-
-      highlightCount: 0,
-      commentCount: 0,
-      latestActivity: null,
-
-      // ✅ 중요: 반드시 넣기 (undefined 금지)
-      sharedByProfile: s.shared_by ? { id: s.shared_by, name, avatarUrl: null } : null,
-    }
-  })
+  // feed 초기 데이터
+  const { feed, nextCursor } = await fetchCircleFeed(circleId)
 
   return (
     <div className="mx-auto max-w-lg px-4 py-6">
-      <div className="mb-5 flex items-center gap-3">
-        <Link
-          href="/circles"
-          className="flex h-10 w-10 items-center justify-center rounded-full bg-secondary transition-colors hover:bg-secondary/80"
-        >
-          <ArrowLeft className="h-5 w-5 text-secondary-foreground" />
-        </Link>
-
-        <div className="min-w-0">
-          <h1 className="text-xl font-semibold text-foreground truncate">
-            {circle.name ?? "Circle"}
-          </h1>
-          <p className="text-xs text-muted-foreground">Circle detail</p>
-        </div>
+      <div className="mb-4">
+        <h1 className="text-xl font-semibold">{circle.name ?? "Circle"}</h1>
+        <p className="text-xs text-muted-foreground">Circle detail</p>
       </div>
 
-      <CircleFeedClient circleId={circleId} initialFeed={initialFeed} initialNextCursor={nextCursor} />
+      <CircleFeedClient circleId={circleId} initialFeed={feed} initialNextCursor={nextCursor} />
     </div>
   )
 }
