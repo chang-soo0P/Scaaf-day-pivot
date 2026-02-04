@@ -1,82 +1,89 @@
+// app/api/circles/share/route.ts
 import { NextRequest, NextResponse } from "next/server"
-import { cookies } from "next/headers"
-import { createServerClient } from "@supabase/ssr"
+import { createSupabaseServerClient } from "@/lib/supabase/server"
 import { createSupabaseAdminClient } from "@/app/api/_supabase/admin-client"
 
 export const runtime = "nodejs"
+export const dynamic = "force-dynamic"
 
-async function createSupabaseAuthedServerClient() {
-  // ✅ Next15: cookies() is Promise
-  const cookieStore = await cookies()
-
-  return createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        get(name: string) {
-          return cookieStore.get(name)?.value
-        },
-        // 세션 갱신 쿠키 set/remove가 꼭 필요 없으면 noop OK
-        set() {},
-        remove() {},
-      },
-    }
-  )
+type Body = {
+  circleId?: string
+  emailId?: string
 }
 
+type Resp =
+  | { ok: true; shareId: string; circleId: string; emailId: string }
+  | { ok: false; error: string }
+
+const SHARES_TABLE = "circle_shares"
+const MEMBERS_TABLE = "circle_members"
+
 export async function POST(req: NextRequest) {
-  const body = await req.json().catch(() => ({}))
-  const circleId = String(body?.circleId ?? "").trim()
-  const emailId = String(body?.emailId ?? "").trim()
+  try {
+    const body = (await req.json().catch(() => ({}))) as Body
+    const circleId = (body.circleId ?? "").trim()
+    const emailId = (body.emailId ?? "").trim()
 
-  if (!circleId || !emailId) {
-    return NextResponse.json({ ok: false, error: "Missing circleId or emailId" }, { status: 400 })
-  }
+    if (!circleId || !emailId) {
+      return NextResponse.json<Resp>({ ok: false, error: "Missing circleId/emailId" }, { status: 400 })
+    }
 
-  // ✅ 로그인 유저 확인(쿠키 기반)
-  const supabaseAuth = await createSupabaseAuthedServerClient()
-  const { data: userData, error: userErr } = await supabaseAuth.auth.getUser()
-  const user = userData?.user
+    // ✅ auth user
+    const supabase = await createSupabaseServerClient()
+    const {
+      data: { user },
+      error: userErr,
+    } = await supabase.auth.getUser()
 
-  if (userErr || !user) {
-    return NextResponse.json({ ok: false, error: "Unauthorized" }, { status: 401 })
-  }
+    if (userErr || !user) {
+      return NextResponse.json<Resp>({ ok: false, error: "Unauthorized" }, { status: 401 })
+    }
 
-  const admin = createSupabaseAdminClient()
+    // ✅ membership check
+    const { data: membership, error: memErr } = await supabase
+      .from(MEMBERS_TABLE)
+      .select("circle_id")
+      .eq("circle_id", circleId)
+      .eq("user_id", user.id)
+      .maybeSingle()
 
-  // ✅ 멤버십 체크: (circle_id, user_id)
-  const { data: member, error: memErr } = await admin
-    .from("circle_members")
-    .select("circle_id, user_id")
-    .eq("circle_id", circleId)
-    .eq("user_id", user.id)
-    .maybeSingle()
+    if (memErr) {
+      return NextResponse.json<Resp>({ ok: false, error: memErr.message }, { status: 500 })
+    }
+    if (!membership) {
+      return NextResponse.json<Resp>({ ok: false, error: "Not a member of this circle" }, { status: 403 })
+    }
 
-  if (memErr) return NextResponse.json({ ok: false, error: memErr.message }, { status: 500 })
-  if (!member) return NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 })
+    // ✅ insert share (admin로 처리하면 RLS에 덜 걸림)
+    const admin = createSupabaseAdminClient()
 
-  // ✅ 중복 공유 방지
-  const { data: existing, error: existErr } = await admin
-    .from("circle_emails")
-    .select("circle_id, email_id")
-    .eq("circle_id", circleId)
-    .eq("email_id", emailId)
-    .maybeSingle()
+    // ⚠️ 중복 공유 방지하고 싶으면: (circle_id,email_id,shared_by) unique + upsert 추천
+    const { data: inserted, error: insErr } = await admin
+      .from(SHARES_TABLE)
+      .insert({
+        circle_id: circleId,
+        email_id: emailId,
+        shared_by: user.id,
+        // shared_at 컬럼이 있으면 넣고, 없으면 created_at 사용
+        shared_at: new Date().toISOString(),
+      })
+      .select("id,circle_id,email_id")
+      .maybeSingle()
 
-  if (existErr) return NextResponse.json({ ok: false, error: existErr.message }, { status: 500 })
-  if (existing) return NextResponse.json({ ok: true, duplicated: true }, { status: 200 })
+    if (insErr) {
+      return NextResponse.json<Resp>({ ok: false, error: insErr.message }, { status: 500 })
+    }
+    if (!inserted) {
+      return NextResponse.json<Resp>({ ok: false, error: "Failed to create share" }, { status: 500 })
+    }
 
-  // ✅ 핵심: shared_by NOT NULL 채우기
-  const { error: insErr } = await admin
-    .from("circle_emails")
-    .insert({
-      circle_id: circleId,
-      email_id: emailId,
-      shared_by: user.id, // ✅ 추가
+    return NextResponse.json<Resp>({
+      ok: true,
+      shareId: inserted.id,
+      circleId: inserted.circle_id,
+      emailId: inserted.email_id,
     })
-
-  if (insErr) return NextResponse.json({ ok: false, error: insErr.message }, { status: 500 })
-
-  return NextResponse.json({ ok: true, duplicated: false }, { status: 200 })
+  } catch (e: any) {
+    return NextResponse.json<Resp>({ ok: false, error: e?.message ?? "Unknown error" }, { status: 500 })
+  }
 }
