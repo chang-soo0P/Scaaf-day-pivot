@@ -295,7 +295,8 @@ export default function CircleFeedClient({
 
     obs.observe(el)
     return () => obs.disconnect()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exha
+    // ustive-deps
   }, [nextCursor, loadingMore])
 
   const rows = useMemo(() => items.map((it) => <ShareRow key={it.id} item={it} />), [items])
