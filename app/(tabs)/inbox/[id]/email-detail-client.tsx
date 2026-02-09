@@ -594,22 +594,28 @@ export default function EmailDetailClient({
   /** -----------------------------
    * share helpers
    * ------------------------------*/
-  async function shareEmailToCircle(circleId: string): Promise<ApiShareResponse> {
+  async function shareToCircle(
+    circleId: string,
+    opts?: { highlightId?: string; isShared?: boolean }
+  ): Promise<ApiShareResponse> {
     if (!isValidEmailId) return { ok: false, error: "Invalid email id" }
 
     setSharing(true)
     try {
+      const body: any = { circleId, emailId }
+
+      if (opts?.highlightId) body.highlightId = opts.highlightId
+      if (typeof opts?.isShared === "boolean") body.isShared = opts.isShared
+
       const res = await fetch("/api/circles/share", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ circleId, emailId }),
+        body: JSON.stringify(body),
         credentials: "include",
       })
-      const data = await safeReadJson<ApiShareResponse>(res)
 
-      if (!res.ok) {
-        return { ok: false, error: (data as any)?.error ?? `HTTP ${res.status}` }
-      }
+      const data = await safeReadJson<ApiShareResponse>(res)
+      if (!res.ok) return { ok: false, error: (data as any)?.error ?? `HTTP ${res.status}` }
       return data
     } finally {
       setSharing(false)
@@ -1341,38 +1347,55 @@ export default function EmailDetailClient({
                         key={c.id}
                         disabled={sharing}
                         onClick={async () => {
-                          const r = await shareEmailToCircle(c.id)
-                          if (!r.ok) {
-                            alert(r.error ?? "Share failed")
-                            return
-                          }
-
-                          // ✅ duplicated 토스트 + 카운트
-                          if (r.duplicated) {
-                            toast({
-                              title: "Already shared",
-                              description: "This email is already shared to that circle.",
-                            })
-                          } else {
-                            toast({ title: "Shared to circle ✅", description: "Added to your circle feed." })
-                            incrementCircleShares()
-                          }
-
-                          // 2) 하이라이트 공유 모드면 기존 기능도 유지
+                          // ✅ highlight share 모드
                           if (shareTarget?.type === "highlight" && highlightToShare?.quote) {
-                            if (!highlightToShare.id) {
+                            let hid = highlightToShare.id
+                        
+                            // highlightId가 없으면 먼저 생성해서 id 확보
+                            if (!hid) {
                               const created = await createHighlight(highlightToShare.quote)
-                              if (created) await markHighlightShared(created.id)
+                              if (!created) {
+                                alert("Failed to create highlight")
+                                return
+                              }
+                              hid = created.id
+                              setHighlightToShare({ id: hid, quote: highlightToShare.quote })
+                            }
+                        
+                            // circle에 email 추가 + highlight 공유(서버에서 is_shared까지 처리)
+                            const r = await shareToCircle(c.id, { highlightId: hid, isShared: true })
+                            if (!r.ok) {
+                              alert(r.error ?? "Share failed")
+                              return
+                            }
+                        
+                            toast({ title: "Shared highlight ✅", description: "Added to your circle feed." })
+                            incrementCircleShares()
+                        
+                            // UI 상태도 맞추기(선택)
+                            await markHighlightShared(hid)
+                          } else {
+                            // ✅ email share 모드(하이라이트 없이)
+                            const r = await shareToCircle(c.id)
+                            if (!r.ok) {
+                              alert(r.error ?? "Share failed")
+                              return
+                            }
+                        
+                            if (r.duplicated) {
+                              toast({ title: "Already shared", description: "This email is already shared to that circle." })
                             } else {
-                              await markHighlightShared(highlightToShare.id)
+                              toast({ title: "Shared to circle ✅", description: "Added to your circle feed." })
+                              incrementCircleShares()
                             }
                           }
-
+                        
                           setShowShareModal(false)
                           setHighlightToShare(null)
                           setShareTarget(null)
                           router.refresh()
-                        }}
+                        }}                        
+                        
                         className={cn(
                           "w-full rounded-2xl bg-secondary p-3 text-left text-sm font-medium hover:bg-secondary/80",
                           sharing && "opacity-60 cursor-not-allowed"
