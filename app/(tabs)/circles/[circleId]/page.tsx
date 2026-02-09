@@ -2,8 +2,8 @@
 import { notFound } from "next/navigation"
 import { headers } from "next/headers"
 import { createSupabaseServerClient } from "@/lib/supabase/server"
-import CircleFeedClient from "./_components/CircleFeedClient"
-import type { CircleFeedApiResponse } from "@/types/circle-feed"
+import HighlightsFeed from "@/components/circles/highlights-feed"
+import type { CircleHighlightsApiResponse } from "@/src/types/circle-highlights"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -28,18 +28,18 @@ async function getBaseUrl() {
   return `${proto}://${host}`
 }
 
-async function fetchCircleFeed(circleId: string) {
+async function fetchCircleHighlights(circleId: string) {
   const baseUrl = await getBaseUrl()
-  const url = `${baseUrl}/api/circles/${circleId}/feed?limit=20`
+  const url = `${baseUrl}/api/circles/${circleId}/highlights?limit=20`
 
   const res = await fetch(url, {
     cache: "no-store",
     headers: { "content-type": "application/json" },
   })
 
-  const data = (await res.json()) as CircleFeedApiResponse
-  if (!res.ok || !data.ok) return { feed: [], nextCursor: null }
-  return { feed: data.feed ?? [], nextCursor: data.nextCursor ?? null }
+  const data = (await res.json()) as CircleHighlightsApiResponse
+  if (!res.ok || !data.ok) return { highlights: [], nextCursor: null }
+  return { highlights: data.highlights ?? [], nextCursor: data.nextCursor ?? null }
 }
 
 export default async function CircleDetailPage({
@@ -82,8 +82,8 @@ export default async function CircleDetailPage({
     notFound()
   }
 
-  // feed 초기 데이터
-  const { feed, nextCursor } = await fetchCircleFeed(circleId)
+  // ✅ highlights 초기 데이터 (옵션 1: 하이라이트 단위 피드)
+  const { highlights, nextCursor } = await fetchCircleHighlights(circleId)
 
   return (
     <div className="mx-auto max-w-lg px-4 py-6">
@@ -92,7 +92,7 @@ export default async function CircleDetailPage({
         <p className="text-xs text-muted-foreground">Circle detail</p>
       </div>
 
-      <CircleFeedClient circleId={circleId} initialFeed={feed} initialNextCursor={nextCursor} />
+      <HighlightsFeed circleId={circleId} />
     </div>
   )
 }
