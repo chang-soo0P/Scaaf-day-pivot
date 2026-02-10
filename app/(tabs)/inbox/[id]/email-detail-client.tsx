@@ -251,6 +251,17 @@ export default function EmailDetailClient({
   const searchParams = useSearchParams()
   const { toast } = useToast()
 
+  // ✅ deep link highlight focus
+  const deepHighlightId = useMemo(() => {
+    const v = searchParams?.get("highlightId")
+    return v && v !== "undefined" && v !== "null" ? v : ""
+  }, [searchParams])
+
+  const [focusedHighlightId, setFocusedHighlightId] = useState<string>("")
+  const highlightElMapRef = useRef<Record<string, HTMLDivElement | null>>({})
+
+
+
   // ✅ Daily mission
   const { incrementHighlights, incrementCircleShares } = useDailyMission()
 
@@ -363,6 +374,28 @@ export default function EmailDetailClient({
   const [newComment, setNewComment] = useState("")
   const [highlightsLoading, setHighlightsLoading] = useState(false)
   const [commentsLoading, setCommentsLoading] = useState(false)
+
+  // ✅ 딥링크 highlightId가 있으면 해당 하이라이트로 스크롤 + 잠깐 강조
+  useEffect(() => {
+    if (!deepHighlightId) return
+    if (!highlights || highlights.length === 0) return
+
+    const exists = highlights.some((h) => h.id === deepHighlightId)
+    if (!exists) return
+
+    const el = highlightElMapRef.current[deepHighlightId]
+    if (!el) return
+
+    try {
+      el.scrollIntoView({ behavior: "smooth", block: "center" })
+    } catch {
+      // ignore
+    }
+
+    setFocusedHighlightId(deepHighlightId)
+    const t = window.setTimeout(() => setFocusedHighlightId(""), 2200)
+    return () => window.clearTimeout(t)
+  }, [deepHighlightId, highlights])
 
   // ✅ circles for share modal
   const [circles, setCircles] = useState<CircleItem[]>([])
@@ -1054,42 +1087,55 @@ export default function EmailDetailClient({
 
           {highlights.length > 0 ? (
             <div className="space-y-2">
-              {highlights.map((h) => (
-                <div key={h.id} className="rounded-xl bg-yellow-500/10 p-3 border-l-2 border-yellow-500">
-                  <p className="text-sm text-foreground/90 italic">"{h.quote}"</p>
-                  <div className="mt-2 flex items-center justify-between">
-                    <span className="text-xs text-muted-foreground">{formatTimeRelative(h.createdAt)}</span>
+{highlights.map((h) => (
+  <div
+    key={h.id}
+    ref={(el) => {
+      highlightElMapRef.current[h.id] = el
+    }}
+    data-highlight-id={h.id}
+    className={cn(
+      "rounded-xl bg-yellow-500/10 p-3 border-l-2 border-yellow-500",
+      // ✅ 딥링크로 들어온 highlightId 또는 최근 포커스 highlight에 flash 효과
+      (focusedHighlightId === h.id || deepHighlightId === h.id) &&
+        "ring-2 ring-primary/50 bg-primary/10 animate-[pulse_1.2s_ease-in-out_2]"
+    )}
+  >
+    <p className="text-sm text-foreground/90 italic">"{h.quote}"</p>
+    <div className="mt-2 flex items-center justify-between">
+      <span className="text-xs text-muted-foreground">{formatTimeRelative(h.createdAt)}</span>
 
-                    <div className="flex items-center gap-3">
-                      <button
-                        onClick={() => handleShareHighlight(h)}
-                        className={cn(
-                          "text-xs hover:underline",
-                          h.isShared ? "text-muted-foreground cursor-default" : "text-primary"
-                        )}
-                        disabled={h.isShared}
-                      >
-                        {h.isShared ? (
-                          <span className="inline-flex items-center gap-1">
-                            <Check className="h-3 w-3" />
-                            Shared
-                          </span>
-                        ) : (
-                          "Share"
-                        )}
-                      </button>
+      <div className="flex items-center gap-3">
+        <button
+          onClick={() => handleShareHighlight(h)}
+          className={cn(
+            "text-xs hover:underline",
+            h.isShared ? "text-muted-foreground cursor-default" : "text-primary"
+          )}
+          disabled={h.isShared}
+        >
+          {h.isShared ? (
+            <span className="inline-flex items-center gap-1">
+              <Check className="h-3 w-3" />
+              Shared
+            </span>
+          ) : (
+            "Share"
+          )}
+        </button>
 
-                      <button
-                        onClick={() => deleteHighlight(h.id)}
-                        className="text-xs text-muted-foreground hover:text-destructive"
-                        aria-label="Remove highlight"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ))}
+        <button
+          onClick={() => deleteHighlight(h.id)}
+          className="text-xs text-muted-foreground hover:text-destructive"
+          aria-label="Remove highlight"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  </div>
+))}
+
             </div>
           ) : (
             <p className="text-sm text-muted-foreground">No highlights yet. Select text and highlight it.</p>
